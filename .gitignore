@@ -1,8 +1,10 @@
 # Python-created cache files
 **/__pycache__
+*.pyc
 
 # Saved actor/critic networks from training
 *.pth
+*.pt
 
 # Plots, recorders, replay buffers
 *plot_*.jpg
@@ -17,3 +19,22 @@ runs/
 # JetBrains folder
 .idea/
 .env-erl/
+
+# Training output directories (checkpoints, logs)
+AlpacaStockVecEnv-v1_*/
+StockTradingEnv-v2_*/
+StockTradingVecEnv-v2_*/
+outputs/
+
+# Dataset files (too large for git)
+datasets/
+*.npy
+*.npz
+*.pandas.dataframe
+
+# Egg info
+*.egg-info/
+
+# Scratch / temp
+full_diff.patch
+notebooks/

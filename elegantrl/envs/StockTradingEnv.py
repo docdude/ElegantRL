@@ -9,7 +9,7 @@ ARY = np.ndarray
 
 class StockTradingEnv:
     def __init__(self, initial_amount=1e6, max_stock=1e2, cost_pct=1e-3, gamma=0.99,
-                 beg_idx=0, end_idx=1113):
+                 beg_idx=0, end_idx=1113, stock_cd_steps=0, min_stock_rate=0.0):
         self.df_pwd = './China_A_shares.pandas.dataframe'
         self.npz_pwd = './China_A_shares.numpy.npz'
 
@@ -25,6 +25,13 @@ class StockTradingEnv:
         self.initial_amount = initial_amount
         self.gamma = gamma
 
+        # stock_cd: cooling down period (simulates T+1 settlement)
+        # After buying a stock, must wait stock_cd_steps before selling
+        self.stock_cd_steps = stock_cd_steps
+        # min_stock_rate: minimum stock holding ratio before selling is allowed
+        # Prevents selling small positions (reduces overtrading)
+        self.min_stock_rate = min_stock_rate
+
         # reset()
         self.day = None
         self.rewards = None
@@ -34,6 +41,7 @@ class StockTradingEnv:
 
         self.amount = None
         self.shares = None
+        self.stock_cd = None  # cooling down counter per stock
         self.shares_num = self.close_ary.shape[1]
         amount_dim = 1
 
@@ -54,6 +62,9 @@ class StockTradingEnv:
             self.amount = self.initial_amount
             self.shares = np.zeros(self.shares_num, dtype=np.float32)
 
+        # Initialize stock cooling down counters (0 = can trade)
+        self.stock_cd = np.zeros(self.shares_num, dtype=np.int32)
+
         self.rewards = []
         self.total_asset = (self.close_ary[self.day] * self.shares).sum() + self.amount
         return self.get_state(), {}
@@ -68,11 +79,18 @@ class StockTradingEnv:
     def step(self, action) -> Tuple[ARY, float, bool, bool, dict]:
         self.day += 1
 
+        # Decrement cooling down counters
+        self.stock_cd = np.maximum(self.stock_cd - 1, 0)
+
         action = action.copy()
         action[(-0.1 < action) & (action < 0.1)] = 0
         action_int = (action * self.max_stock).astype(int)
         # actions initially is scaled between -1 and 1
         # convert into integer because we can't buy fraction of shares
+
+        # Calculate minimum shares needed before selling is allowed
+        total_shares_value = (self.close_ary[self.day] * self.shares).sum()
+        min_shares_threshold = self.min_stock_rate * self.initial_amount
 
         for index in range(self.action_dim):
             stock_action = action_int[index]
@@ -81,7 +99,16 @@ class StockTradingEnv:
                 delta_stock = min(self.amount // adj_close_price, stock_action)
                 self.amount -= adj_close_price * delta_stock * (1 + self.cost_pct)
                 self.shares[index] += delta_stock
+                # Set cooling down period after buying
+                if delta_stock > 0 and self.stock_cd_steps > 0:
+                    self.stock_cd[index] = self.stock_cd_steps
             elif self.shares[index] > 0:  # sell_stock
+                # Check cooling down period (T+1 simulation)
+                if self.stock_cd[index] > 0:
+                    continue  # Cannot sell during cooling down period
+                # Check minimum stock rate threshold
+                if total_shares_value < min_shares_threshold:
+                    continue  # Cannot sell if below minimum holding threshold
                 delta_stock = min(-stock_action, self.shares[index])
                 self.amount += adj_close_price * delta_stock * (1 - self.cost_pct)
                 self.shares[index] -= delta_stock
@@ -158,7 +185,8 @@ def _inplace_amount_shares_when_sell(amount, shares, stock_action, close, cost_r
 
 class StockTradingVecEnv:
     def __init__(self, initial_amount=1e6, max_stock=1e2, cost_pct=1e-3, gamma=0.99,
-                 beg_idx=0, end_idx=1113, num_envs=4, gpu_id=0):
+                 beg_idx=0, end_idx=1113, num_envs=4, gpu_id=0,
+                 stock_cd_steps=0, min_stock_rate=0.0):
         self.df_pwd = './elegantrl/envs/China_A_shares.pandas.dataframe'
         self.npz_pwd = './elegantrl/envs/China_A_shares.numpy.npz'
         self.device = th.device(f"cuda:{gpu_id}" if (th.cuda.is_available() and (gpu_id >= 0)) else "cpu")
@@ -180,6 +208,13 @@ class StockTradingVecEnv:
         self.initial_amount = initial_amount
         self.if_random_reset = True
 
+        # stock_cd: cooling down period (simulates T+1 settlement)
+        # After buying a stock, must wait stock_cd_steps before selling
+        self.stock_cd_steps = stock_cd_steps
+        # min_stock_rate: minimum stock holding ratio before selling is allowed
+        # Prevents selling small positions (reduces overtrading)
+        self.min_stock_rate = min_stock_rate
+
         '''init (reset)'''
         self.day = None
         self.rewards = None
@@ -188,6 +223,7 @@ class StockTradingVecEnv:
 
         self.amount = None
         self.shares = None
+        self.stock_cd = None  # cooling down counter per stock per env
         self.clears = None
         self.num_shares = self.close_price.shape[1]
         amount_dim = 1
@@ -229,9 +265,12 @@ class StockTradingVecEnv:
             rand_shares = rand_shares.clip(-2, +2) * 2 ** 7
             self.shares = self.shares + th.abs(rand_shares).type(th.int32)
 
+        # Initialize stock cooling down counters (0 = can trade)
+        self.stock_cd = th.zeros((self.num_envs, self.num_shares), dtype=th.int32, device=self.device)
+
         self.rewards = list()
         self.total_asset = self.vmap_get_total_asset(self.close_price[self.day], self.shares, self.amount)
-        return self.get_state()
+        return self.get_state(), {}
 
     def get_state(self):
         return self.vmap_get_state((self.amount * 2 ** -18).tanh(),
@@ -244,24 +283,44 @@ class StockTradingVecEnv:
         if self.day == 1:
             self.cumulative_returns = 0.
 
-        # action = action.clone()
-        action = th.ones_like(action)
+        # Decrement cooling down counters
+        self.stock_cd = th.clamp(self.stock_cd - 1, min=0)
+
+        action = action.clone()
+        # action = th.ones_like(action)  # DEBUG: removed - was overriding agent actions
         action[(-0.1 < action) & (action < 0.1)] = 0
         action_int = (action * self.max_stock).to(th.int32)
         # actions initially is scaled between -1 and 1
         # convert `action` into integer as `stock_action`, because we can't buy fraction of shares
+
+        # Calculate total shares value for min_stock_rate check
+        total_shares_value = (self.close_price[self.day] * self.shares).sum(dim=1, keepdim=True)
+        min_shares_threshold = self.min_stock_rate * self.initial_amount
 
         for i in range(self.num_shares):
             buy_idx = th.where(action_int[:, i] > 0)[0]
             if buy_idx.shape[0] > 0:
                 part_amount = self.amount[buy_idx]
                 part_shares = self.shares[buy_idx, i]
+                old_shares = part_shares.clone()
                 self.vmap_inplace_amount_shares_when_buy(part_amount, part_shares, action_int[buy_idx, i],
                                                          self.close_price[self.day, i], self.cost_pct)
                 self.amount[buy_idx] = part_amount
                 self.shares[buy_idx, i] = part_shares
+                # Set cooling down period for stocks that were actually bought
+                if self.stock_cd_steps > 0:
+                    bought_mask = part_shares > old_shares
+                    if bought_mask.any():
+                        self.stock_cd[buy_idx[bought_mask], i] = self.stock_cd_steps
 
-            sell_idx = th.where((action_int < 0) & (self.shares > 0))[0]
+            # Build sell mask: action < 0, shares > 0, not in cooling down, above min threshold
+            sell_mask = (action_int[:, i] < 0) & (self.shares[:, i] > 0)
+            if self.stock_cd_steps > 0:
+                sell_mask = sell_mask & (self.stock_cd[:, i] == 0)  # Not in cooling down
+            if self.min_stock_rate > 0:
+                sell_mask = sell_mask & (total_shares_value.squeeze(1) >= min_shares_threshold)
+            sell_idx = th.where(sell_mask)[0]
+
             if sell_idx.shape[0] > 0:
                 part_amount = self.amount[sell_idx]
                 part_shares = self.shares[sell_idx, i]
@@ -308,9 +367,10 @@ class StockTradingVecEnv:
             self.cumulative_returns = (total_asset / self.initial_amount) * 100
             self.cumulative_returns = self.cumulative_returns.squeeze(1).cpu().data.tolist()
 
-        state = self.reset() if done else self.get_state()  # automatically reset in vectorized env
+        state = self.reset()[0] if done else self.get_state()  # automatically reset in vectorized env
         done = th.tensor(done, dtype=th.bool, device=self.device).expand(self.num_envs)
-        return state, reward, done, ()
+        truncate = th.zeros(self.num_envs, dtype=th.bool, device=self.device)
+        return state, reward, done, truncate, {}
 
     def load_data_from_disk(self, tech_id_list=None):
         tech_id_list = [

@@ -292,16 +292,21 @@ class AgentA2C(AgentPPO):
     def update_objectives(self, buffer: tuple[TEN, ...], update_t: int) -> tuple[float, float]:
         states, actions, unmasks, logprobs, advantages, reward_sums = buffer
 
-        buffer_size = states.shape[0]
-        indices = th.randint(buffer_size, size=(self.batch_size,), requires_grad=False)
-        state = states[indices]
-        action = actions[indices]
-        unmask = unmasks[indices]
-        # logprob = logprobs[indices]
-        advantage = advantages[indices]
-        reward_sum = reward_sums[indices]
+        # Use 2D sampling like PPO for VecEnv compatibility
+        sample_len = states.shape[0]
+        num_seqs = states.shape[1]
+        ids = th.randint(sample_len * num_seqs, size=(self.batch_size,), requires_grad=False, device=self.device)
+        ids0 = th.fmod(ids, sample_len)  # ids % sample_len
+        ids1 = th.div(ids, sample_len, rounding_mode='floor')  # ids // sample_len
 
-        value = self.cri(state).squeeze(1)  # critic network predicts the reward_sum (Q value) of state
+        state = states[ids0, ids1]
+        action = actions[ids0, ids1]
+        unmask = unmasks[ids0, ids1]
+        # logprob = logprobs[ids0, ids1]
+        advantage = advantages[ids0, ids1]
+        reward_sum = reward_sums[ids0, ids1]
+
+        value = self.cri(state).squeeze(-1)  # critic network predicts the reward_sum (Q value) of state
         obj_critic = (self.criterion(value, reward_sum) * unmask).mean()
         self.optimizer_backward(self.cri_optimizer, obj_critic)
 

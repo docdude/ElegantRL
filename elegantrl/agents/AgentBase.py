@@ -46,6 +46,7 @@ class AgentBase:
         self.buffer_init_size = args.buffer_init_size  # train after samples over buffer_init_size for off-policy
 
         self.explore_noise_std = getattr(args, 'explore_noise_std', 0.05)  # standard deviation of exploration noise
+        self.explore_rate = getattr(args, 'explore_rate', 0.0)  # epsilon for DQN-style exploration (0.0 for continuous)
         self.last_state: Optional[TEN] = None  # last state of the trajectory. shape == (num_envs, state_dim)
         self.device = th.device(f"cuda:{gpu_id}" if (th.cuda.is_available() and (gpu_id >= 0)) else "cpu")
 

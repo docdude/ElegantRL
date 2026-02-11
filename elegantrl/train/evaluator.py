@@ -257,43 +257,63 @@ def draw_learning_curve(recorder: np.ndarray = None,
     """
 
     import matplotlib.pyplot as plt
-    fig, axs = plt.subplots(2)
+    fig, axs = plt.subplots(2, figsize=(10, 8))
 
-    '''axs[0]'''
+    '''axs[0] - Episode Return and Explore AvgReward'''
     ax00 = axs[0]
     ax00.cla()
 
+    # Left y-axis: Episode Return (evaluation)
+    color0 = 'royalblue'
+    ax00.set_ylabel('Episode Return (eval)', color=color0)
+    ax00.plot(steps, r_avg, label='Episode Return', color=color0, linewidth=2)
+    ax00.fill_between(steps, r_avg - r_std, r_avg + r_std, facecolor=color0, alpha=0.2, label='±1 std')
+    ax00.tick_params(axis='y', labelcolor=color0)
+
+    # Right y-axis: Explore AvgReward
     ax01 = axs[0].twinx()
-    color01 = 'darkcyan'
+    color01 = 'darkorange'
     ax01.set_ylabel('Explore AvgReward', color=color01)
-    ax01.plot(steps, r_exp, color=color01, alpha=0.5, )
+    ax01.plot(steps, r_exp, color=color01, alpha=0.7, linewidth=1.5, linestyle='--', label='Explore Reward')
     ax01.tick_params(axis='y', labelcolor=color01)
 
-    color0 = 'lightcoral'
-    ax00.set_ylabel('Episode Return', color=color0)
-    ax00.plot(steps, r_avg, label='Episode Return', color=color0)
-    ax00.fill_between(steps, r_avg - r_std, r_avg + r_std, facecolor=color0, alpha=0.3)
-    ax00.grid()
-    '''axs[1]'''
+    # Combined legend for top panel
+    lines0, labels0 = ax00.get_legend_handles_labels()
+    lines1, labels1 = ax01.get_legend_handles_labels()
+    ax00.legend(lines0 + lines1, labels0 + labels1, loc='upper left')
+    ax00.grid(alpha=0.3)
+    ax00.set_title('Rewards')
+
+    '''axs[1] - Actor and Critic Objectives'''
     ax10 = axs[1]
     ax10.cla()
 
+    # Left y-axis: objA (Actor/Policy objective)
+    color10 = 'green'
+    ax10.set_xlabel('Total Steps')
+    ax10.set_ylabel('objA (Actor)', color=color10)
+    ax10.plot(steps, obj_a, label='objA (Policy)', color=color10, linewidth=2)
+    ax10.tick_params(axis='y', labelcolor=color10)
+    ax10.axhline(0, color='gray', linestyle=':', alpha=0.5)
+
+    # Right y-axis: objC (Critic/Value loss)
     ax11 = axs[1].twinx()
-    color11 = 'darkcyan'
-    ax11.set_ylabel('objC', color=color11)
-    ax11.fill_between(steps, obj_c, facecolor=color11, alpha=0.2, )
+    color11 = 'crimson'
+    ax11.set_ylabel('objC (Critic)', color=color11)
+    ax11.plot(steps, obj_c, color=color11, linewidth=2, alpha=0.8, label='objC (Value Loss)')
     ax11.tick_params(axis='y', labelcolor=color11)
 
-    color10 = 'royalblue'
-    ax10.set_xlabel('Total Steps')
-    ax10.set_ylabel('objA', color=color10)
-    ax10.plot(steps, obj_a, label='objA', color=color10)
-    ax10.tick_params(axis='y', labelcolor=color10)
+    # Plot any additional columns
     for plot_i in range(6, recorder.shape[1]):
         other = recorder[:, plot_i]
-        ax10.plot(steps, other, label=f'{plot_i}', color='grey', alpha=0.5)
-    ax10.legend()
-    ax10.grid()
+        ax10.plot(steps, other, label=f'col_{plot_i}', color='grey', alpha=0.5, linestyle=':')
+
+    # Combined legend for bottom panel
+    lines10, labels10 = ax10.get_legend_handles_labels()
+    lines11, labels11 = ax11.get_legend_handles_labels()
+    ax10.legend(lines10 + lines11, labels10 + labels11, loc='upper right')
+    ax10.grid(alpha=0.3)
+    ax10.set_title('Training Objectives')
 
     '''plot save'''
     plt.title(fig_title, y=2.3)

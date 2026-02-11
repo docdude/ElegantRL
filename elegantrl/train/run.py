@@ -12,6 +12,7 @@ from .config import build_env
 from .replay_buffer import ReplayBuffer
 from .evaluator import Evaluator
 from .evaluator import get_rewards_and_steps
+from elegantrl.envs.vec_normalize import VecNormalize
 
 if os.name == 'nt':  # if is WindowOS (Windows NT)
     """Fix bug about Anaconda in WindowOS
@@ -42,6 +43,14 @@ def train_agent_single_process(args: Config):
 
     '''init environment'''
     env = build_env(args.env_class, args.env_args, args.gpu_id)
+    
+    # Load VecNormalize stats if continuing training
+    if args.continue_train:
+        vec_norm_path = f"{args.cwd}/vec_normalize.pt"
+        if hasattr(env, 'load') or os.path.exists(vec_norm_path):
+            if os.path.exists(vec_norm_path):
+                env = VecNormalize.load(vec_norm_path, env)
+                print(f"| Loaded VecNormalize stats from {vec_norm_path}")
 
     '''init agent'''
     agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
@@ -127,6 +136,11 @@ def train_agent_single_process(args: Config):
         th.set_grad_enabled(False)
 
         evaluator.evaluate_and_save(actor=agent.act, steps=horizon_len, exp_r=exp_r, logging_tuple=logging_tuple)
+        
+        # Save VecNormalize stats periodically (overwrites each eval cycle)
+        if hasattr(env, 'save'):
+            env.save(f"{cwd}/vec_normalize.pt")
+        
         if_train = (evaluator.total_step <= break_step) and (not os.path.exists(f"{cwd}/stop"))
 
     print(f'| UsedTime: {time.time() - evaluator.start_time:>7.0f} | SavedDir: {cwd}', flush=True)
@@ -136,6 +150,8 @@ def train_agent_single_process(args: Config):
     agent.save_or_load_agent(cwd, if_save=True)
     if if_save_buffer and hasattr(buffer, 'save_or_load_history'):
         buffer.save_or_load_history(cwd, if_save=True)
+    if hasattr(env, 'save'):  # VecNormalize wrapper
+        env.save(f"{cwd}/vec_normalize.pt")
 
 
 def train_agent_multiprocessing(args: Config):
@@ -373,6 +389,14 @@ class Worker(Process):
 
         '''init environment'''
         env = build_env(args.env_class, args.env_args, args.gpu_id)
+        
+        # Load VecNormalize stats if continuing training
+        if args.continue_train:
+            vec_norm_path = f"{args.cwd}/vec_normalize.pt"
+            if os.path.exists(vec_norm_path):
+                env = VecNormalize.load(vec_norm_path, env)
+                if worker_id == 0:
+                    print(f"| Worker-0 Loaded VecNormalize stats from {vec_norm_path}")
 
         '''init agent'''
         agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
@@ -395,10 +419,12 @@ class Worker(Process):
 
         '''init buffer'''
         horizon_len = args.horizon_len
+        cwd = args.cwd  # Save for VecNormalize periodic save
 
         '''loop'''
         del args
 
+        save_counter = 0
         while True:
             '''Worker receive actor from Learner'''
             actor = self.recv_pipe.recv()
@@ -413,8 +439,15 @@ class Worker(Process):
                 buffer_items = [t.cpu() for t in buffer_items]
                 last_state = deepcopy(last_state).cpu()
             self.send_pipe.send((worker_id, buffer_items, last_state))
+            
+            # Save VecNormalize stats periodically from worker 0
+            save_counter += 1
+            if worker_id == 0 and hasattr(env, 'save') and save_counter % 10 == 0:
+                env.save(f"{cwd}/vec_normalize.pt")
 
         env.close() if hasattr(env, 'close') else None
+        if worker_id == 0 and hasattr(env, 'save'):  # VecNormalize: save from first worker only
+            env.save(f"{cwd}/vec_normalize.pt")
         print(f"| Worker-{self.worker_id} Closed", flush=True)
 
 

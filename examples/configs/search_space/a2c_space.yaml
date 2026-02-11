@@ -1,0 +1,65 @@
+# A2C Hyperparameter Search Space
+# Used with Hypersweeper for HPO
+# A2C shares most params with PPO (inherits from AgentPPO in ElegantRL)
+
+hyperparameters:
+  # === Core hyperparameters ===
+  learning_rate:
+    type: uniform_float
+    lower: 1e-5
+    upper: 1e-3
+    log: true
+    default_value: ${learning_rate}
+  
+  gamma:
+    type: categorical
+    choices: [0.9, 0.95, 0.98, 0.99, 0.995, 0.999]
+    default_value: ${gamma}
+  
+  # === Network architecture ===
+  net_arch:
+    type: categorical
+    choices: ["small", "medium", "large"]
+    default_value: ${net_arch}
+    # small=[64,64], medium=[256,128], large=[512,256]
+  
+  # === On-policy specific ===
+  batch_size:
+    type: categorical
+    choices: [128, 256, 512, 1024]
+    default_value: ${batch_size}
+  
+  # NOTE: horizon_len fixed to max_step for on-policy
+  
+  lambda_gae_adv:
+    type: categorical
+    choices: [0.8, 0.9, 0.92, 0.95, 0.98, 0.99]
+    default_value: ${lambda_gae_adv}
+  
+  lambda_entropy:
+    type: uniform_float
+    lower: 1e-8
+    upper: 0.1
+    log: true
+    default_value: ${lambda_entropy}
+  
+  repeat_times:
+    type: categorical
+    choices: [4, 8, 10, 16, 20, 32]
+    default_value: ${repeat_times}
+  
+  clip_grad_norm:
+    type: categorical
+    choices: [0.5, 1.0, 2.0, 3.0, 5.0]
+    default_value: ${clip_grad_norm}
+  
+  # A2C uses ratio_clip like PPO (inherited)
+  ratio_clip:
+    type: categorical
+    choices: [0.1, 0.2, 0.25, 0.3, 0.4]
+    default_value: ${ratio_clip}
+  
+  if_use_v_trace:
+    type: categorical
+    choices: [true, false]
+    default_value: ${if_use_v_trace}

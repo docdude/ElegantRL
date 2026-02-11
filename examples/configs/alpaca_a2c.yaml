@@ -1,0 +1,77 @@
+# A2C Base Configuration for Alpaca Stock Trading HPO
+# Usage: python examples/hpo_alpaca_vecenv.py --config-name=alpaca_a2c
+# HPO:   python examples/hpo_alpaca_vecenv.py -m --config-name=alpaca_a2c
+# A2C: Advantage Actor-Critic (inherits from PPO in ElegantRL)
+
+defaults:
+  - _self_
+  - search_space: a2c_space
+  - override hydra/sweeper: HyperSMAC
+
+# Agent settings
+agent: a2c
+gpu_id: 0
+
+# Cross-validation methodology
+cv_method: holdout  # holdout | wf | cpcv
+n_folds: 3          # for wf
+n_groups: 5         # for cpcv (N)
+n_test_groups: 2    # for cpcv (K)
+embargo_pct: 0.01   # cpcv embargo
+test_ratio: 0.2     # held-out test fraction
+gap_days: 0
+
+# Training settings
+seed: 42
+break_step: 500000
+
+# Environment settings (fixed)
+state_dim: 283
+action_dim: 28
+max_step: 119  # validation period
+num_envs: 2048  # Large for on-policy (like PPO)
+
+# Hyperparameters (defaults - overridden by search space)
+learning_rate: 1e-4
+gamma: 0.99
+net_arch: "small"  # small=[64,64], medium=[256,128], large=[512,256]
+batch_size: 512
+repeat_times: 16
+clip_grad_norm: 3.0
+
+# A2C/PPO specific (A2C inherits from PPO)
+ratio_clip: 0.25
+lambda_gae_adv: 0.95
+lambda_entropy: 0.01
+if_use_v_trace: true
+
+# VecNormalize settings (obs only for on-policy)
+use_vec_normalize: true
+norm_obs: true
+norm_reward: false  # On-policy has GAE
+
+# HPO settings
+cleanup_checkpoints: true
+
+hydra:
+  sweeper:
+    n_trials: 50
+    sweeper_kwargs:
+      seeds: [0, 1, 2]
+      max_parallelization: 1
+      optimizer_kwargs:
+        smac_facade:
+          _target_: smac.facade.HyperparameterOptimizationFacade
+          _partial_: true
+          logging_level: 20
+        scenario:
+          seed: ${seed}
+          n_trials: ${hydra.sweeper.n_trials}
+          deterministic: false
+          n_workers: 1
+          output_directory: ${hydra.sweep.dir}
+    search_space: ${search_space}
+  run:
+    dir: outputs/${agent}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/${agent}_sweep/${now:%Y-%m-%d_%H-%M-%S}

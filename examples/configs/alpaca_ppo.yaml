@@ -1,0 +1,97 @@
+# PPO Base Configuration for Alpaca Stock Trading HPO
+# Usage: python examples/hpo_alpaca_vecenv.py --config-name=alpaca_ppo
+# HPO:   python examples/hpo_alpaca_vecenv.py -m --config-name=alpaca_ppo
+#
+# Based on: https://github.com/automl/hypersweeper/tree/main/examples
+# Follows: https://github.com/facebookresearch/how-to-autorl checklist
+
+defaults:
+  - _self_
+  - search_space: ppo_space
+  - override hydra/sweeper: HyperSMAC
+
+# Agent settings
+agent: ppo
+gpu_id: 0  # Use RTX 2080 (CUDA:1 if H200 is on CUDA:0)
+
+# Cross-validation methodology
+# cv_method: holdout | wf (anchored walk-forward) | cpcv (López de Prado 2018)
+# test_ratio: Fraction of data held out for final OOS test (never seen during HPO)
+# See docs/AUTORL_CHECKLIST.md for validation methodology discussion
+# References:
+#   - López de Prado (2018): Advances in Financial Machine Learning - CPCV
+#   - Bailey et al. (2014): Probability of Backtest Overfitting
+#   - Bischl et al. 2023: https://doi.org/10.1002/widm.1484
+#   - Schneider et al. 2024: https://arxiv.org/abs/2405.15393
+cv_method: holdout  # TESTING: Use 'wf' or 'cpcv' for production HPO
+n_folds: 3          # Number of walk-forward folds (only for cv_method=wf)
+n_groups: 5         # CPCV: number of groups N (only for cv_method=cpcv)
+n_test_groups: 2    # CPCV: number of test groups K → C(N,K) splits
+embargo_pct: 0.01   # CPCV: embargo fraction after test groups
+test_ratio: 0.2     # Held-out test fraction (final OOS evaluation)
+gap_days: 0         # Purging gap between train/val (holdout/wf only)
+
+# Training settings (defaults - can be overridden by HPO)
+seed: 42
+break_step: 500000  # 500K steps (fast for HPO, increase for final training)
+
+# Environment settings (fixed - not tuned)
+state_dim: 283
+action_dim: 28
+max_step: 119  # validation period ~119 days (was incorrect: 602)
+num_envs: 2048  # Match demo: 2^11 = 2048 (RTX 2080 can handle this)
+
+# Hyperparameters (defaults - overridden by search space)
+# Match demo_FinRL_Alpaca_VecEnv.py settings
+learning_rate: 1e-4  # Demo uses 1e-4 for PPO
+gamma: 0.99
+net_arch: "small"  # Demo uses [128, 64] = small
+batch_size: 512
+repeat_times: 16
+
+# PPO-specific (match demo)
+ratio_clip: 0.25
+lambda_gae_adv: 0.95
+lambda_entropy: 0.01  # Demo uses 0.01
+clip_grad_norm: 3.0  # Default from config.py
+if_use_v_trace: true  # V-trace for advantage estimation (default in ElegantRL)
+
+# VecNormalize settings (observation normalization)
+use_vec_normalize: true  # Match demo - enables running obs normalization
+norm_obs: true
+norm_reward: false  # PPO has GAE, don't normalize rewards
+
+# HPO settings
+cleanup_checkpoints: true  # Delete checkpoints after each trial
+
+# Hydra settings
+hydra:
+  sweeper:
+    n_trials: 50
+    resume: true  # Resume from previous run if interrupted
+    # Multi-seed evaluation (AutoRL best practice)
+    # Averages performance across seeds during optimization
+    sweeper_kwargs:
+      seeds: [0, 1, 2]  # Tuning seeds - separate from test seeds!
+      max_parallelization: 1  # Sequential for single GPU
+      maximize: true  # We return negative Sharpe, but want to maximize Sharpe
+      # WandB logging (uncomment to enable dashboard)
+      # wandb_project: "elegantrl-hpo"
+      # wandb_entity: "your-wandb-username"
+      # wandb_mode: "online"
+      optimizer_kwargs:
+        smac_facade:
+          _target_: smac.facade.HyperparameterOptimizationFacade
+          _partial_: true
+          logging_level: 20  # INFO
+        scenario:
+          seed: ${seed}
+          n_trials: ${hydra.sweeper.n_trials}
+          deterministic: false  # Stochastic RL
+          n_workers: 1
+          output_directory: ${hydra.sweep.dir}
+    search_space: ${search_space}
+  run:
+    dir: outputs/${agent}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/${agent}_sweep/${now:%Y-%m-%d_%H-%M-%S}

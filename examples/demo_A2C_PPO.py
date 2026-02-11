@@ -10,6 +10,7 @@ except ImportError or ModuleNotFoundError:
     from elegantrl import train_agent
     from elegantrl import get_gym_env_args
     from elegantrl.agents import AgentPPO, AgentA2C
+    from elegantrl.agents import AgentSAC, AgentDDPG
 
 """continuous action"""
 
@@ -330,15 +331,13 @@ def train_ppo_a2c_for_bipedal_walker_vec_env(agent_class, gpu_id: int):
 
 
 def train_ppo_a2c_for_stock_trading(agent_class, gpu_id: int):
-    assert agent_class in {AgentPPO, AgentA2C}  # DRL algorithm name
+    assert agent_class in {AgentPPO, AgentA2C, AgentSAC, AgentDDPG}  # DRL algorithm name
 
     from elegantrl.envs.StockTradingEnv import StockTradingEnv
     id0 = 0
     id1 = int(1113 * 0.8)
     id2 = 1113
     gamma = 0.99
-
-    agent_class = [AgentPPO, AgentA2C][DRL_ID]  # DRL algorithm name
     env_class = StockTradingEnv
     env_args = {'env_name': 'StockTradingEnv-v2',
                 'num_envs': 1,
@@ -361,6 +360,12 @@ def train_ppo_a2c_for_stock_trading(agent_class, gpu_id: int):
     args.repeat_times = 16  # repeatedly update network using ReplayBuffer to keep critic's loss small
     args.learning_rate = 1e-4
     args.state_value_tau = 0.1  # the tau of normalize for value and state `std = (1-std)*std + tau*std`
+
+    # off-policy specific overrides for SAC/DDPG to prevent OOM
+    if args.if_off_policy:
+        args.buffer_size = int(1e4)  # reduce from 1e6 default
+        args.batch_size = 64
+        args.horizon_len = 256
 
     args.eval_times = 2 ** 5
     args.eval_per_step = int(2e4)
@@ -398,16 +403,16 @@ ID     Step    Time |    avgR   stdR   avgS  stdS |    expR   objC   etc.
 
 
 def train_ppo_a2c_for_stock_trading_vec_env(agent_class, gpu_id: int):
-    assert agent_class in {AgentPPO, AgentA2C}  # DRL algorithm name
+    assert agent_class in {AgentPPO, AgentA2C, AgentSAC, AgentDDPG}  # DRL algorithm name
 
     from elegantrl.envs.StockTradingEnv import StockTradingVecEnv
     id0 = 0
     id1 = int(1113 * 0.8)
     id2 = 1113
-    num_envs = 2 ** 11
-    gamma = 0.99
 
-    agent_class = [AgentPPO, AgentA2C][DRL_ID]  # DRL algorithm name
+    #num_envs = 128 # for SAC/DDPG
+    num_envs = 2 ** 11 # for PPO/A2C
+    gamma = 0.99
     env_class = StockTradingVecEnv
     env_args = {'env_name': 'StockTradingVecEnv-v2',
                 'num_envs': num_envs,
@@ -422,14 +427,22 @@ def train_ppo_a2c_for_stock_trading_vec_env(agent_class, gpu_id: int):
     # get_gym_vec_env_args(env=StockTradingVecEnv(), if_print=True)  # return env_args
 
     args = Config(agent_class, env_class, env_args)  # see `erl_config.py Arguments()` for hyperparameter explanation
-    args.break_step = int(1e5)  # break training if 'total_step > break_step'
+    args.break_step = int(1e6)  # break training if 'total_step > break_step'
     args.net_dims = [128, 64]  # the middle layer dimension of MultiLayer Perceptron
     args.gamma = gamma  # discount factor of future rewards
-    args.horizon_len = args.max_step
+    args.horizon_len = args.max_step 
 
     args.repeat_times = 16  # repeatedly update network using ReplayBuffer to keep critic's loss small
     args.learning_rate = 2e-4
     args.state_value_tau = 0.1  # the tau of normalize for value and state `std = (1-std)*std + tau*std`
+
+    # off-policy specific overrides for SAC/DDPG to prevent OOM
+    if args.if_off_policy:
+        args.buffer_size = int(1e5)  # reduce from 1e6 default - prevents massive memory allocation
+        args.batch_size = 64
+        args.horizon_len = 256
+        # optionally reduce num_envs for off-policy since they don't benefit as much from parallelism
+        # env_args['num_envs'] = 4
 
     args.eval_times = 2 ** 14
     args.eval_per_step = int(2e4)
@@ -574,8 +587,8 @@ if __name__ == '__main__':
     DRL_ID = Args.drl
     ENV_ID = Args.env
 
-    AgentClassList = [AgentPPO, AgentA2C]
-    AgentClass = AgentClassList[DRL_ID]  # DRL algorithm name
+    AgentClassList = [AgentPPO, AgentA2C, AgentSAC, AgentDDPG]
+    AgentClass = AgentClassList[DRL_ID]  # DRL algorithm name (0=PPO, 1=A2C, 2=SAC, 3=DDPG)
 
     if ENV_ID in {'0', 'pendulum'}:
         train_ppo_a2c_for_pendulum(agent_class=AgentClass, gpu_id=GPU_ID)
@@ -589,5 +602,9 @@ if __name__ == '__main__':
         train_ppo_a2c_for_bipedal_walker(agent_class=AgentClass, gpu_id=GPU_ID)
     elif ENV_ID in {'5', 'bipedal_walker_vec'}:
         train_ppo_a2c_for_bipedal_walker_vec_env(agent_class=AgentClass, gpu_id=GPU_ID)
+    elif ENV_ID in {'6', 'stock_trading'}:
+        train_ppo_a2c_for_stock_trading(agent_class=AgentClass, gpu_id=GPU_ID)
+    elif ENV_ID in {'7', 'stock_trading_vec'}:
+        train_ppo_a2c_for_stock_trading_vec_env(agent_class=AgentClass, gpu_id=GPU_ID)
     else:
         print('ENV_ID not match', flush=True)

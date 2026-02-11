@@ -133,6 +133,15 @@ def build_env(env_class=None, env_args: dict = None, gpu_id: int = -1):
 
     for attr_str in ('env_name', 'num_envs', 'max_step', 'state_dim', 'action_dim', 'if_discrete'):
         setattr(env, attr_str, env_args[attr_str])
+    
+    # Optional: Wrap with VecNormalize for observation/reward normalization
+    if env_args.get('use_vec_normalize', False):
+        from elegantrl.envs.vec_normalize import VecNormalize
+        norm_kwargs = env_args.get('vec_normalize_kwargs', {})
+        env = VecNormalize(env, **norm_kwargs)
+        print(f"  ✓ VecNormalize enabled: norm_obs={norm_kwargs.get('norm_obs', True)}, "
+              f"norm_reward={norm_kwargs.get('norm_reward', True)}")
+    
     return env
 
 

@@ -1,0 +1,74 @@
+# PPO Hyperparameter Search Space
+# Used with Hypersweeper for HPO
+# Based on FinRL hyperparams_opt.py + ElegantRL-specific params
+# Format follows: https://github.com/automl/hypersweeper examples
+
+hyperparameters:
+  # === Core hyperparameters ===
+  learning_rate:
+    type: uniform_float
+    lower: 1e-5
+    upper: 1e-3
+    log: true
+    default_value: ${learning_rate}
+  
+  gamma:
+    type: categorical
+    choices: [0.9, 0.95, 0.98, 0.99, 0.995, 0.999]
+    default_value: ${gamma}
+  
+  # === Network architecture (categorical like FinRL) ===
+  net_arch:
+    type: categorical
+    choices: ["small", "medium", "large"]
+    default_value: ${net_arch}
+    # small=[64,64], medium=[256,128], large=[512,256]
+  
+  # === PPO-specific ===
+  batch_size:
+    type: categorical
+    choices: [128, 256, 512, 1024]
+    default_value: ${batch_size}
+  
+  # NOTE: horizon_len should be <= max_step (119 for Alpaca env)
+  # For PPO: typically set to max_step (full episode rollout)
+  # Removed from search space - fixed to max_step in hpo_alpaca_vecenv.py
+  # horizon_len:
+  #   type: categorical
+  #   choices: [64, 128]  # Must be <= max_step=119
+  #   default_value: ${horizon_len}
+  
+  ratio_clip:
+    type: categorical
+    choices: [0.1, 0.2, 0.25, 0.3, 0.4]
+    default_value: ${ratio_clip}
+  
+  lambda_gae_adv:
+    type: categorical
+    choices: [0.8, 0.9, 0.92, 0.95, 0.98, 0.99]
+    default_value: ${lambda_gae_adv}
+  
+  lambda_entropy:
+    type: uniform_float
+    lower: 1e-8
+    upper: 0.1
+    log: true
+    default_value: ${lambda_entropy}
+  
+  repeat_times:
+    type: categorical
+    choices: [4, 8, 10, 16, 20, 32]
+    default_value: ${repeat_times}
+  
+  # clip_grad_norm: gradient clipping (used by ElegantRL in optimizer_backward)
+  clip_grad_norm:
+    type: categorical
+    choices: [0.5, 1.0, 2.0, 3.0, 5.0]
+    default_value: ${clip_grad_norm}
+  
+  # if_use_v_trace: Use V-trace for advantage estimation (True) or standard GAE (False)
+  # V-trace is better for off-policy correction, standard GAE may be more stable
+  if_use_v_trace:
+    type: categorical
+    choices: [true, false]
+    default_value: ${if_use_v_trace}

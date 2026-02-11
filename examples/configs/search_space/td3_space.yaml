@@ -1,0 +1,81 @@
+# TD3 Hyperparameter Search Space
+# Used with Hypersweeper for HPO
+# Based on ElegantRL AgentTD3 parameters
+
+hyperparameters:
+  # === Core hyperparameters ===
+  learning_rate:
+    type: uniform_float
+    lower: 1e-5
+    upper: 1e-3
+    log: true
+    default_value: ${learning_rate}
+  
+  gamma:
+    type: categorical
+    choices: [0.9, 0.95, 0.98, 0.99, 0.995, 0.999]
+    default_value: ${gamma}
+  
+  # === Network architecture ===
+  net_arch:
+    type: categorical
+    choices: ["small", "medium", "large"]
+    default_value: ${net_arch}
+    # small=[64,64], medium=[256,128], large=[512,256]
+  
+  # === Off-policy specific ===
+  batch_size:
+    type: categorical
+    choices: [64, 128, 256, 512]
+    default_value: ${batch_size}
+  
+  buffer_size:
+    type: categorical
+    choices: [50000, 100000, 200000, 500000]
+    default_value: ${buffer_size}
+  
+  soft_update_tau:
+    type: uniform_float
+    lower: 1e-3
+    upper: 5e-2
+    log: true
+    default_value: ${soft_update_tau}
+  
+  repeat_times:
+    type: categorical
+    choices: [1, 2, 4, 8]
+    default_value: ${repeat_times}
+  
+  clip_grad_norm:
+    type: categorical
+    choices: [0.5, 1.0, 2.0, 3.0, 5.0]
+    default_value: ${clip_grad_norm}
+  
+  # === TD3 specific ===
+  explore_noise_std:
+    type: uniform_float
+    lower: 0.01
+    upper: 0.3
+    log: false
+    default_value: ${explore_noise_std}
+    # Exploration noise (Gaussian std)
+  
+  policy_noise_std:
+    type: uniform_float
+    lower: 0.05
+    upper: 0.3
+    log: false
+    default_value: ${policy_noise_std}
+    # Target policy smoothing noise
+  
+  update_freq:
+    type: categorical
+    choices: [1, 2, 4]
+    default_value: ${update_freq}
+    # Delayed policy update frequency
+  
+  num_ensembles:
+    type: categorical
+    choices: [2, 4, 8]
+    default_value: ${num_ensembles}
+    # Number of critic networks

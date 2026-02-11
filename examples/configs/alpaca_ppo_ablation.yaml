@@ -1,0 +1,74 @@
+# Ablation Path Analysis for PPO
+# Run AFTER HPO completes to understand which HP changes helped most
+#
+# Traces the path from default config → best config, showing which
+# HP changes contributed most to improvement.
+#
+# Usage:
+#   python examples/hpo_alpaca_vecenv.py -m --config-name=alpaca_ppo_ablation \
+#       hydra.sweeper.sweeper_kwargs.data_path=outputs/ppo_sweep/<timestamp>/runhistory.csv
+#
+# Output:
+#   - ablation_path.csv: Ordered HP changes with performance
+#   - ablation_path.png: Visualization of improvement path
+
+defaults:
+  - _self_
+  - search_space: ppo_space
+  - override hydra/sweeper: HyperAblationPath
+
+# Agent settings (same as main config)
+agent: ppo
+gpu_id: 0
+
+# Training settings for evaluation runs
+seed: 42
+break_step: 100000  # Shorter runs for analysis
+
+# Environment settings
+state_dim: 283
+action_dim: 28
+max_step: 119
+num_envs: 2048
+
+# Default hyperparameters (SOURCE config - defaults before tuning)
+learning_rate: 1e-4
+gamma: 0.99
+net_arch: "small"
+batch_size: 512
+repeat_times: 16
+ratio_clip: 0.25
+lambda_gae_adv: 0.95
+lambda_entropy: 0.01
+clip_grad_norm: 3.0
+if_use_v_trace: true
+
+# VecNormalize
+use_vec_normalize: true
+norm_obs: true
+norm_reward: false
+
+# CV settings (single holdout for analysis)
+cv_method: holdout
+n_folds: 1
+n_groups: 5
+n_test_groups: 2
+embargo_pct: 0.01
+test_ratio: 0.2
+gap_days: 0
+
+hydra:
+  sweeper:
+    sweeper_kwargs:
+      # Path to runhistory from HPO (REQUIRED - override on command line)
+      data_path: null  # outputs/ppo_sweep/<timestamp>/runhistory.csv
+      performance_key: "performance"
+      config_key: "config_id"
+      run_source: true  # Start from source (default) config
+      # Optional: specify source/target configs explicitly
+      # source_config: null  # Uses default config if not specified
+      # target_config: null  # Uses best from data_path if not specified
+  run:
+    dir: outputs/${agent}_ablation/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/${agent}_ablation/${now:%Y-%m-%d_%H-%M-%S}
