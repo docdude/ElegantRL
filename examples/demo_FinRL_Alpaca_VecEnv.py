@@ -670,28 +670,28 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         print(f"   ⚠️  Disabling state_value_tau (was {state_value_tau}) - VecNormalize handles normalization")
         state_value_tau = 0
     
-    # VecNormalize settings - different for on-policy vs off-policy agents
-    # On-policy (PPO/A2C): Normalize both obs and rewards - data is consumed once and discarded,
-    #   ElegantRL's env already scales rewards (reward_scale=2^-12), so VecNormalize norm_reward
-    #   on top of that creates double-normalization for on-policy agents, causing GAE noise amplification.
-    # Off-policy (SAC/TD3/DDPG): norm_reward=True provides variance reduction for Q-learning
-    #   which is self-consistent regardless of reward scale.
-    norm_reward = is_off_policy  # Off-policy: extra normalization helps Q-learning; On-policy: env scaling sufficient
+    # VecNormalize settings
+    # ElegantRL envs already apply internal reward scaling (reward_scale=2^-12 for stocks,
+    # HPO-tuned norm_reward for crypto). Adding VecNormalize norm_reward on top creates
+    # double-normalization that causes divergence for ALL agent types:
+    #   - TD3 with norm_reward=True: objC exploded to 1,360,436 by 281K steps
+    #   - TD3 without VecNorm: objC stable at ~1.0 over 496K steps
+    #   - A2C with norm_reward=True: objA exploded at ~450K steps
+    #   - A2C with norm_reward=False: objC stable over 1M steps
+    # RL Zoo also never uses VecNormalize for TD3/SAC/DDPG.
+    norm_reward = False  # Always False — env already scales rewards internally
     
     vec_normalize_kwargs = {
         'norm_obs': True,
         'norm_reward': norm_reward,
         'clip_obs': 10.0,
-        'clip_reward': 10.0 if norm_reward else None,
+        'clip_reward': None,
         'gamma': gamma,
         'training': True,
     }
     
     if use_vec_normalize:
-        if is_off_policy:
-            print(f"   📊 VecNormalize: norm_obs=True, norm_reward=False (off-policy: stale replay buffer)")
-        else:
-            print(f"   📊 VecNormalize: norm_obs=True, norm_reward=True (on-policy: data consumed once)")
+        print(f"   📊 VecNormalize: norm_obs=True, norm_reward=False (env already scales rewards internally)")
     
     env_args = {
         'env_name': 'AlpacaStockVecEnv-v1',

@@ -599,17 +599,19 @@ def train_and_evaluate(cfg: DictConfig) -> float:
         if_use_v_trace = cfg.get('if_use_v_trace', True)
     
     # VecNormalize settings
-    # Off-policy: norm_reward=True (variance reduction for Q-learning, self-consistent)
-    # On-policy: norm_reward=False (env already scales rewards; double-normalization causes GAE noise amplification)
+    # ElegantRL envs already apply internal reward scaling — adding VecNormalize
+    # norm_reward on top causes divergence for ALL agent types (double-normalization).
+    # TD3 with norm_reward=True: objC exploded to 1.3M; without: stable at ~1.0.
+    # A2C with norm_reward=True: objA exploded; with False: stable.
     use_vec_normalize = cfg.get('use_vec_normalize', True)
     norm_obs = cfg.get('norm_obs', True)
-    norm_reward = cfg.get('norm_reward', is_off_policy)
+    norm_reward = cfg.get('norm_reward', False)  # Always False — env already scales rewards
     
     vec_normalize_kwargs = {
         'norm_obs': norm_obs,
         'norm_reward': norm_reward,
         'clip_obs': 10.0,
-        'clip_reward': 10.0 if norm_reward else None,
+        'clip_reward': None,
         'gamma': gamma,
         'training': True,
     }
