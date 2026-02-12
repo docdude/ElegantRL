@@ -970,11 +970,11 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     
     # VecNormalize settings - different for on-policy vs off-policy agents
     # On-policy (PPO/A2C): Normalize both obs and rewards - data is consumed once and discarded,
-    #   so non-stationary reward normalization is safe. RL Zoo uses normalize=True (both) for PPO.
-    # Off-policy (SAC/TD3/DDPG): Only normalize observations - reward normalization creates
-    #   non-stationary targets in the replay buffer, causing critic divergence.
-    #   RL Zoo never uses norm_reward=True for off-policy agents.
-    norm_reward = not is_off_policy  # Only normalize rewards for on-policy agents
+    #   ElegantRL's env already scales rewards (reward_scale=2^-12), so VecNormalize norm_reward
+    #   on top of that creates double-normalization for on-policy agents, causing GAE noise amplification.
+    # Off-policy (SAC/TD3/DDPG): norm_reward=True provides variance reduction for Q-learning
+    #   which is self-consistent regardless of reward scale.
+    norm_reward = is_off_policy  # Off-policy: extra normalization helps Q-learning; On-policy: env scaling sufficient
     
     vec_normalize_kwargs = {
         'norm_obs': True,

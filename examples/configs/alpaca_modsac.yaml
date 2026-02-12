@@ -49,7 +49,7 @@ critic_tau: 0.995   # For reliable_lambda calculation
 # VecNormalize settings
 use_vec_normalize: true
 norm_obs: true
-norm_reward: false  # Off-policy: stale replay buffer causes critic divergence
+norm_reward: true  # Off-policy: VecNormalize reward normalization provides variance reduction for Q-learning
 
 # HPO settings
 cleanup_checkpoints: true

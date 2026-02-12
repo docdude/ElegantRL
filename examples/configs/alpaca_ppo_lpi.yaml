@@ -43,7 +43,7 @@ if_use_v_trace: true
 # VecNormalize
 use_vec_normalize: true
 norm_obs: true
-norm_reward: true  # On-policy: data consumed once, safe to normalize rewards
+norm_reward: false  # On-policy: env already scales rewards (2^-12); double-normalization causes GAE divergence
 
 # CV settings (single holdout for analysis)
 cv_method: holdout
