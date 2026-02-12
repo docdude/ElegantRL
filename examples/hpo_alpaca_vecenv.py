@@ -599,9 +599,11 @@ def train_and_evaluate(cfg: DictConfig) -> float:
         if_use_v_trace = cfg.get('if_use_v_trace', True)
     
     # VecNormalize settings
+    # On-policy: norm_reward=True (data consumed once, safe)
+    # Off-policy: norm_reward=False (stale replay buffer causes critic divergence)
     use_vec_normalize = cfg.get('use_vec_normalize', True)
     norm_obs = cfg.get('norm_obs', True)
-    norm_reward = cfg.get('norm_reward', is_off_policy)
+    norm_reward = cfg.get('norm_reward', not is_off_policy)
     
     vec_normalize_kwargs = {
         'norm_obs': norm_obs,

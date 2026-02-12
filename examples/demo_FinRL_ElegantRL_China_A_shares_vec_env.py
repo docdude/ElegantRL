@@ -444,9 +444,12 @@ def run(gpu_id: int = 0, eval_only: bool = False, checkpoint: str = None,
         state_value_tau = 0
     
     # VecNormalize settings - different for on-policy vs off-policy agents
-    # On-policy (PPO/A2C): Only normalize observations - they have internal advantage normalization
-    # Off-policy (SAC/TD3/DDPG): Normalize both obs and rewards - no internal reward handling
-    norm_reward = is_off_policy  # Only normalize rewards for off-policy agents
+    # On-policy (PPO/A2C): Normalize both obs and rewards - data is consumed once and discarded,
+    #   so non-stationary reward normalization is safe. RL Zoo uses normalize=True (both) for PPO.
+    # Off-policy (SAC/TD3/DDPG): Only normalize observations - reward normalization creates
+    #   non-stationary targets in the replay buffer, causing critic divergence.
+    #   RL Zoo never uses norm_reward=True for off-policy agents.
+    norm_reward = not is_off_policy  # Only normalize rewards for on-policy agents
     
     vec_normalize_kwargs = {
         'norm_obs': True,
@@ -459,9 +462,9 @@ def run(gpu_id: int = 0, eval_only: bool = False, checkpoint: str = None,
     
     if use_vec_normalize:
         if is_off_policy:
-            print(f"   📊 VecNormalize: norm_obs=True, norm_reward=True (off-policy)")
+            print(f"   📊 VecNormalize: norm_obs=True, norm_reward=False (off-policy: stale replay buffer)")
         else:
-            print(f"   📊 VecNormalize: norm_obs=True, norm_reward=False (on-policy has GAE)")
+            print(f"   📊 VecNormalize: norm_obs=True, norm_reward=True (on-policy: data consumed once)")
     
     env_args = {
         'env_name': 'StockTradingVecEnv-v2',

@@ -59,7 +59,7 @@ if_use_v_trace: true  # V-trace for advantage estimation (default in ElegantRL)
 # VecNormalize settings (observation normalization)
 use_vec_normalize: true  # Match demo - enables running obs normalization
 norm_obs: true
-norm_reward: false  # PPO has GAE, don't normalize rewards
+norm_reward: true  # On-policy: data consumed once, safe to normalize rewards
 
 # HPO settings
 cleanup_checkpoints: true  # Delete checkpoints after each trial
