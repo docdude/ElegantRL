@@ -12,7 +12,7 @@ from .config import build_env
 from .replay_buffer import ReplayBuffer
 from .evaluator import Evaluator
 from .evaluator import get_rewards_and_steps
-from elegantrl.envs.vec_normalize import VecNormalize
+from elegantrl.envs.vec_normalize import VecNormalize  # noqa: F401
 
 if os.name == 'nt':  # if is WindowOS (Windows NT)
     """Fix bug about Anaconda in WindowOS
@@ -47,10 +47,9 @@ def train_agent_single_process(args: Config):
     # Load VecNormalize stats if continuing training
     if args.continue_train:
         vec_norm_path = f"{args.cwd}/vec_normalize.pt"
-        if hasattr(env, 'load') or os.path.exists(vec_norm_path):
-            if os.path.exists(vec_norm_path):
-                env = VecNormalize.load(vec_norm_path, env)
-                print(f"| Loaded VecNormalize stats from {vec_norm_path}")
+        if os.path.exists(vec_norm_path) and hasattr(env, 'load'):
+            env.load(vec_norm_path, verbose=True)
+            print(f"| Loaded VecNormalize stats from {vec_norm_path}")
 
     '''init agent'''
     agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
@@ -135,11 +134,13 @@ def train_agent_single_process(args: Config):
         logging_tuple = (*logging_tuple, agent.explore_rate, show_str)
         th.set_grad_enabled(False)
 
-        evaluator.evaluate_and_save(actor=agent.act, steps=horizon_len, exp_r=exp_r, logging_tuple=logging_tuple)
-        
-        # Save VecNormalize stats periodically (overwrites each eval cycle)
+        # Sync VecNormalize stats from training env to eval env before evaluation
         if hasattr(env, 'save'):
             env.save(f"{cwd}/vec_normalize.pt")
+            if hasattr(evaluator.env, 'load'):
+                evaluator.env.load(f"{cwd}/vec_normalize.pt")
+
+        evaluator.evaluate_and_save(actor=agent.act, steps=horizon_len, exp_r=exp_r, logging_tuple=logging_tuple)
         
         if_train = (evaluator.total_step <= break_step) and (not os.path.exists(f"{cwd}/stop"))
 
@@ -393,8 +394,8 @@ class Worker(Process):
         # Load VecNormalize stats if continuing training
         if args.continue_train:
             vec_norm_path = f"{args.cwd}/vec_normalize.pt"
-            if os.path.exists(vec_norm_path):
-                env = VecNormalize.load(vec_norm_path, env)
+            if os.path.exists(vec_norm_path) and hasattr(env, 'load'):
+                env.load(vec_norm_path, verbose=(worker_id == 0))
                 if worker_id == 0:
                     print(f"| Worker-0 Loaded VecNormalize stats from {vec_norm_path}")
 
@@ -484,6 +485,10 @@ class EvaluatorProc(Process):
                 evaluator.total_step += steps  # update total_step but don't update recorder
             else:
                 actor = actor.to(device) if os.name == 'nt' else actor  # WindowsNT_OS can only send cpu_tensor
+                # Sync VecNormalize stats from training env (saved by worker) to eval env
+                vec_norm_path = f"{cwd}/vec_normalize.pt"
+                if os.path.exists(vec_norm_path) and hasattr(evaluator.env, 'load'):
+                    evaluator.env.load(vec_norm_path)
                 evaluator.evaluate_and_save(actor, steps, exp_r, logging_tuple)
 
             '''Evaluator send the training signal to Learner'''

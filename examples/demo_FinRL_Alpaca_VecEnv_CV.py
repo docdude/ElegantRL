@@ -302,7 +302,8 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
                             baseline_ticker: str = '^DJI',
                             trade_start_date: str = '2023-06-01',
                             trade_end_date: str = '2024-01-01',
-                            agent_name: str = 'PPO'):
+                            agent_name: str = 'PPO',
+                            checkpoint_name: str = None):
     """
     Run backtest using FinRL's backtest infrastructure.
     
@@ -503,9 +504,11 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
         ax4.set_ylabel('Drawdown (%)')
         ax4.grid(True, alpha=0.3)
         
+        if checkpoint_name:
+            fig.suptitle(f'Checkpoint: {checkpoint_name}', fontsize=10, y=1.01)
         plt.tight_layout()
         plot_path = f"{save_path}/backtest_results.png"
-        plt.savefig(plot_path, dpi=150)
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"| Saved backtest plot to: {plot_path}")
         plt.close()
         
@@ -550,7 +553,10 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
                                    where=strategy_returns < baseline_resampled,
                                    label='Underperformance')
                     
-                    ax.set_title(f'Strategy vs {baseline_ticker} Baseline')
+                    title = f'Strategy vs {baseline_ticker} Baseline'
+                    if checkpoint_name:
+                        title += f'\nCheckpoint: {checkpoint_name}'
+                    ax.set_title(title)
                     ax.set_xlabel('Trading Day')
                     ax.set_ylabel('Cumulative Return (%)')
                     ax.legend(loc='best')
@@ -558,7 +564,7 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
                     
                     plt.tight_layout()
                     comparison_path = f"{save_path}/baseline_comparison.png"
-                    plt.savefig(comparison_path, dpi=150)
+                    plt.savefig(comparison_path, dpi=150, bbox_inches='tight')
                     print(f"| Saved baseline comparison to: {comparison_path}")
                     plt.close()
             except Exception as e:
@@ -977,19 +983,22 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     #   - A2C with norm_reward=True: objA exploded at ~450K steps
     #   - A2C with norm_reward=False: objC stable over 1M steps
     # RL Zoo also never uses VecNormalize for TD3/SAC/DDPG.
-    norm_reward = False  # Always False — env already scales rewards internally
+    # PPO with norm_reward=True: stable (clip prevents gradient explosion)
+    # A2C with norm_reward=True: objA exploded at ~420K steps (no clip)
+    # Off-policy: always False (never use VecNormalize reward scaling)
+    norm_reward = not is_off_policy  # True for PPO/A2C, False for SAC/TD3/DDPG
     
     vec_normalize_kwargs = {
         'norm_obs': True,
         'norm_reward': norm_reward,
         'clip_obs': 10.0,
-        'clip_reward': None,
+        'clip_reward': 10.0 if norm_reward else None,
         'gamma': gamma,
         'training': True,
     }
     
     if use_vec_normalize:
-        print(f"   📊 VecNormalize: norm_obs=True, norm_reward=False (env already scales rewards internally)")
+        print(f"   📊 VecNormalize: norm_obs=True, norm_reward={norm_reward} (env already scales rewards internally)")
     
     # Dynamic num_workers based on CPU count and policy type
     cpu_count = os.cpu_count() or 8
@@ -1070,10 +1079,16 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
             args.soft_update_tau = soft_update_tau
         else:
             # On-policy specific settings (PPO/A2C)
+            # Explicit defaults matching HPO script (agent getattr fallbacks are the same,
+            # but being explicit prevents silent drift if agent defaults ever change)
             args.lambda_entropy = lambda_entropy
+            args.ratio_clip = 0.25           # PPO clip range: ratio.clamp(1-clip, 1+clip)
+            args.lambda_gae_adv = 0.95       # GAE lambda for advantage estimation
+            args.if_use_v_trace = True        # V-trace for on-policy advantage calculation
+            args.clip_grad_norm = 3.0         # Gradient clipping norm
         
         args.eval_times = 32
-        args.eval_per_step = int(5e3) if is_off_policy else int(2e4)
+        args.eval_per_step = int(5e3)  # More frequent feedback (matches main script)
         args.num_workers = num_workers
         
         # Eval env uses validation period
@@ -1153,6 +1168,17 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
             num_envs=num_envs,
             gpu_id=gpu_id
         )
+        
+        # Wrap with VecNormalize if training used it (load stats from fold checkpoint dir)
+        # training=False: freeze stats, still apply saved obs normalization to match training
+        vec_norm_path = os.path.join(args.cwd, 'vec_normalize.pt') if os.path.isdir(args.cwd) else None
+        if vec_norm_path and os.path.exists(vec_norm_path):
+            val_env = VecNormalize(val_env, training=False)
+            val_env.load(vec_norm_path, verbose=True)
+            print(f"   ✓ Loaded VecNormalize stats from {vec_norm_path}")
+        elif use_vec_normalize:
+            print(f"   ⚠️  WARNING: --normalize was used but vec_normalize.pt not found in {args.cwd}!")
+            print(f"      Evaluation with raw observations may produce INCORRECT results.")
         
         # Load actor
         try:
@@ -1357,6 +1383,17 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
                 gpu_id=gpu_id
             )
             
+            # Wrap with VecNormalize if training used it
+            # training=False: freeze stats, still apply saved obs normalization
+            vec_norm_path = os.path.join(save_path, 'vec_normalize.pt') if save_path else None
+            if vec_norm_path and os.path.exists(vec_norm_path):
+                val_env = VecNormalize(val_env, training=False)
+                val_env.load(vec_norm_path, verbose=True)
+                print(f"| ✓ Loaded VecNormalize stats from {vec_norm_path}")
+            elif use_vec_normalize:
+                print(f"| ⚠️  WARNING: --normalize was used but vec_normalize.pt not found!")
+                print(f"|    Evaluation with raw observations may produce INCORRECT results.")
+            
             # Load actor
             try:
                 actor = th.load(actor_path, map_location=f'cuda:{gpu_id}' if gpu_id >= 0 else 'cpu', weights_only=False)
@@ -1378,7 +1415,8 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
                 baseline_ticker='^DJI',
                 trade_start_date=TEST_START,
                 trade_end_date=TEST_END,
-                agent_name=agent_name
+                agent_name=agent_name,
+                checkpoint_name=os.path.basename(actor_path) if actor_path else None
             )
 
 

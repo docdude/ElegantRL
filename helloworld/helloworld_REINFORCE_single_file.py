@@ -1064,7 +1064,7 @@ def read_data():
     trade.index.names = ['']
     return train,trade
 
-def train_reinforce_for_stocktrading(gpu_id: int = 0):
+def train_reinforce_for_stocktrading(gpu_id: int = 0, eval_only: bool = False):
     agent_class = AgentREINFORCE  # DRL algorithm name
     train,trade = read_data()
     stock_dimension = len(train.tic.unique())
@@ -1092,16 +1092,40 @@ def train_reinforce_for_stocktrading(gpu_id: int = 0):
     args.repeat_times = 1  # repeatedly update network using ReplayBuffer to keep critic's loss small
 
     args.gpu_id = gpu_id
-    train_agent(args)
-    if input("| Press 'y' to load actor.pth and render:") == 'y':
-        actor_name = sorted([s for s in os.listdir(args.cwd) if s[-4:] == '.pth'])[-1]
-        actor_path = f"{args.cwd}/{actor_name}"
-        valid_agent(env_class, env_args, args.net_dims, agent_class, actor_path)
+
+    cwd = f'./{env_args["env_name"]}_{agent_class.__name__[5:]}_{0}'
+
+    if not eval_only:
+        train_agent(args)
+        if input("| Press 'y' to load actor.pth and render:") != 'y':
+            return
+
+    # Find best checkpoint
+    actor_name = sorted([s for s in os.listdir(cwd) if s[-4:] == '.pth'])[-1]
+    actor_path = f"{cwd}/{actor_name}"
+
+    # Validate on TRAIN data (in-sample)
+    print(f"\n{'='*50}")
+    print(f"IN-SAMPLE VALIDATION (train data)")
+    print(f"{'='*50}")
+    valid_agent(env_class, env_args, args.net_dims, agent_class, actor_path)
+
+    # Validate on TRADE data (out-of-sample)
+    trade_env_args = {**env_args, "df": trade}
+    print(f"\n{'='*50}")
+    print(f"OUT-OF-SAMPLE VALIDATION (trade data)")
+    print(f"{'='*50}")
+    valid_agent(env_class, trade_env_args, args.net_dims, agent_class, actor_path)
 
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--eval', action='store_true', help='Skip training, validate only')
+    parser.add_argument('--gpu', type=int, default=0)
+    cli_args = parser.parse_args()
     # fetch_data()
-    train_reinforce_for_stocktrading()
+    train_reinforce_for_stocktrading(gpu_id=cli_args.gpu, eval_only=cli_args.eval)
 
 

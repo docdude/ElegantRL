@@ -362,9 +362,9 @@ def evaluate_agent(
     
     # Load VecNormalize stats if available (critical for correct evaluation)
     if vec_normalize_path and os.path.exists(vec_normalize_path):
-        env = VecNormalize.load(vec_normalize_path, env)
-        env.training = False  # Don't update stats during eval
-        env.norm_reward = False  # Don't normalize rewards during eval
+        from elegantrl.envs.vec_normalize import VecNormalize
+        env = VecNormalize(env, training=False, norm_reward=False)
+        env.load(vec_normalize_path)
         print(f"| Loaded VecNormalize stats from {vec_normalize_path}")
     
     # Disable random reset for fair/reproducible evaluation
@@ -603,7 +603,7 @@ def train_and_evaluate(cfg: DictConfig) -> float:
     # norm_reward on top causes divergence for ALL agent types (double-normalization).
     # TD3 with norm_reward=True: objC exploded to 1.3M; without: stable at ~1.0.
     # A2C with norm_reward=True: objA exploded; with False: stable.
-    use_vec_normalize = cfg.get('use_vec_normalize', True)
+    use_vec_normalize = cfg.get('use_vec_normalize', False)  # Default False: env already scales obs/rewards
     norm_obs = cfg.get('norm_obs', True)
     norm_reward = cfg.get('norm_reward', False)  # Always False — env already scales rewards
     

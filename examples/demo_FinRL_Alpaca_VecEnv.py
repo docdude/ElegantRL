@@ -64,7 +64,8 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
                             baseline_ticker: str = '^DJI',
                             trade_start_date: str = '2023-06-01',
                             trade_end_date: str = '2024-01-01',
-                            agent_name: str = 'PPO'):
+                            agent_name: str = 'PPO',
+                            checkpoint_name: str = None):
     """
     Run backtest using FinRL's backtest infrastructure.
     
@@ -265,9 +266,11 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
         ax4.set_ylabel('Drawdown (%)')
         ax4.grid(True, alpha=0.3)
         
+        if checkpoint_name:
+            fig.suptitle(f'Checkpoint: {checkpoint_name}', fontsize=10, y=1.01)
         plt.tight_layout()
         plot_path = f"{save_path}/backtest_results.png"
-        plt.savefig(plot_path, dpi=150)
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"| Saved backtest plot to: {plot_path}")
         plt.close()
         
@@ -312,7 +315,10 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
                                    where=strategy_returns < baseline_resampled,
                                    label='Underperformance')
                     
-                    ax.set_title(f'Strategy vs {baseline_ticker} Baseline')
+                    title = f'Strategy vs {baseline_ticker} Baseline'
+                    if checkpoint_name:
+                        title += f'\nCheckpoint: {checkpoint_name}'
+                    ax.set_title(title)
                     ax.set_xlabel('Trading Day')
                     ax.set_ylabel('Cumulative Return (%)')
                     ax.legend(loc='best')
@@ -320,7 +326,7 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
                     
                     plt.tight_layout()
                     comparison_path = f"{save_path}/baseline_comparison.png"
-                    plt.savefig(comparison_path, dpi=150)
+                    plt.savefig(comparison_path, dpi=150, bbox_inches='tight')
                     print(f"| Saved baseline comparison to: {comparison_path}")
                     plt.close()
             except Exception as e:
@@ -679,19 +685,22 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     #   - A2C with norm_reward=True: objA exploded at ~450K steps
     #   - A2C with norm_reward=False: objC stable over 1M steps
     # RL Zoo also never uses VecNormalize for TD3/SAC/DDPG.
-    norm_reward = False  # Always False — env already scales rewards internally
+    # PPO with norm_reward=True: stable (clip prevents gradient explosion)
+    # A2C with norm_reward=True: objA exploded at ~420K steps (no clip)
+    # Off-policy: always False (never use VecNormalize reward scaling)
+    norm_reward = not is_off_policy  # True for PPO/A2C, False for SAC/TD3/DDPG
     
     vec_normalize_kwargs = {
         'norm_obs': True,
         'norm_reward': norm_reward,
         'clip_obs': 10.0,
-        'clip_reward': None,
+        'clip_reward': 10.0 if norm_reward else None,
         'gamma': gamma,
         'training': True,
     }
     
     if use_vec_normalize:
-        print(f"   📊 VecNormalize: norm_obs=True, norm_reward=False (env already scales rewards internally)")
+        print(f"   📊 VecNormalize: norm_obs=True, norm_reward={norm_reward} (env already scales rewards internally)")
     
     env_args = {
         'env_name': 'AlpacaStockVecEnv-v1',
@@ -741,7 +750,13 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         # buffer_init_size uses default: batch_size * 8 = 2048
     else:
         # On-policy specific settings (PPO/A2C)
+        # Explicit defaults matching HPO script (agent getattr fallbacks are the same,
+        # but being explicit prevents silent drift if agent defaults ever change)
         args.lambda_entropy = lambda_entropy  # Entropy coefficient for exploration
+        args.ratio_clip = 0.25           # PPO clip range: ratio.clamp(1-clip, 1+clip)
+        args.lambda_gae_adv = 0.95       # GAE lambda for advantage estimation
+        args.if_use_v_trace = True        # V-trace for on-policy advantage calculation
+        args.clip_grad_norm = 3.0         # Gradient clipping norm
     
     #args.eval_times = 2 ** 14  # 16384 evaluations
     #args.eval_per_step = int(2e4)
@@ -791,7 +806,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         print("\n" + "="*60)
         print("STEP 3: Skipping Training (eval-only mode)")
         print("="*60)
-        cwd = checkpoint
+        cwd = checkpoint if checkpoint else args.cwd
     
     # 6. Validation
     # Find checkpoint - use best (highest avgR) or most recent based on flag
@@ -833,12 +848,16 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     else:
         # Eval-only mode requires a checkpoint
         if not actor_path:
-            # Try to find latest checkpoint directory
-            pattern = f"*_{agent_name.upper()}_*"
-            import glob
-            dirs = sorted(glob.glob(f"./{pattern}"))
-            if dirs:
-                cwd = dirs[-1]
+            # First try args.cwd (includes env name + suffix), then fall back to glob
+            if not (cwd and os.path.isdir(cwd)):
+                # Fallback: search for matching directories
+                pattern = f"*_{agent_name.upper()}_*"
+                import glob
+                dirs = sorted(glob.glob(f"./{pattern}"))
+                if dirs:
+                    cwd = dirs[-1]
+            # Search for actor checkpoints in the resolved directory
+            if cwd and os.path.isdir(cwd):
                 if use_best_checkpoint:
                     actor_path = find_best_checkpoint(cwd)
                 else:
@@ -889,9 +908,9 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     # - Non-normalized runs: Use raw env (correct behavior)
     vec_norm_path = os.path.join(save_path, 'vec_normalize.pt') if save_path else None
     if vec_norm_path and os.path.exists(vec_norm_path):
-        # New runs: Load VecNormalize stats
+        # Load VecNormalize stats (training=False: freeze stats, apply saved obs normalization)
         val_env = VecNormalize(val_env, training=False)
-        val_env.load(vec_norm_path)
+        val_env.load(vec_norm_path, verbose=True)
         print(f"| ✓ Loaded VecNormalize stats from {vec_norm_path}")
     elif use_vec_normalize:
         # Old _norm runs: Stats not saved, can't properly evaluate
@@ -924,7 +943,8 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         baseline_ticker='^DJI',  # Compare to Dow Jones
         trade_start_date=TEST_START,
         trade_end_date=TEST_END,
-        agent_name=agent_name
+        agent_name=agent_name,
+        checkpoint_name=os.path.basename(actor_path) if actor_path else None
     )
 
 
@@ -941,7 +961,8 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint dir or .pt file (for --eval mode)')
     parser.add_argument('--normalize', action='store_true', dest='use_vec_normalize',
-                        help='Enable VecNormalize for obs/reward normalization (recommended for off-policy agents)')
+                        help='Enable VecNormalize wrapper (EXPERIMENTAL — env already applies 2^-N scaling; '
+                             'norm_obs=True causes double-normalization and divergence for ALL agents tested)')
     parser.add_argument('--suffix', type=str, default=None,
                         help='Suffix to append to checkpoint directory (e.g., v2, norm, test)')
     parser.add_argument('--best', action='store_true',

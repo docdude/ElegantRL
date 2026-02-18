@@ -104,7 +104,7 @@ def main(checkpoint_dir, gpu_id=0):
     if os.path.exists(vec_norm_path):
         from elegantrl.envs.vec_normalize import VecNormalize
         val_env = VecNormalize(val_env, training=False)
-        val_env.load(vec_norm_path)
+        val_env.load(vec_norm_path, verbose=True)
         print(f"✓ Loaded VecNormalize stats from {vec_norm_path}")
     elif '_norm' in checkpoint_dir:
         # Old _norm runs without saved stats

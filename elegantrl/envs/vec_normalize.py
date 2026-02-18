@@ -138,13 +138,6 @@ class VecNormalize:
         self.if_discrete = env.if_discrete
         self.env_name = f"VecNormalize({env.env_name})"
         
-        # Forward other attributes
-        for attr in ['if_random_reset', 'initial_amount', 'close_price', 
-                     'tech_factor', 'cumulative_returns', 'total_asset']:
-            if hasattr(env, attr):
-                # Create property-like forwarding
-                pass
-        
         # Initialize running statistics
         self.obs_rms = RunningMeanStd(shape=(self.state_dim,), device=self.device, epsilon=epsilon)
         self.ret_rms = RunningMeanStd(shape=(), device=self.device, epsilon=epsilon)
@@ -173,8 +166,13 @@ class VecNormalize:
             return
         
         # Attributes that must be forwarded to the inner env
-        _ENV_ATTRS = {'if_random_reset', 'initial_amount', 'gamma',
-                      'cost_pct', 'max_stock', 'reward_scale'}
+        # NOTE: gamma and reward_scale are NOT forwarded — VecNormalize has its
+        # own gamma (for return-based reward normalization) and reward_scale is
+        # internal to the env.  Forwarding gamma during __init__ would silently
+        # overwrite the inner env's gamma AND leave VecNormalize without a local
+        # copy (reads would fall through via __getattr__, hiding the problem).
+        _ENV_ATTRS = {'if_random_reset', 'initial_amount',
+                      'cost_pct', 'max_stock'}
         if name in _ENV_ATTRS:
             setattr(self.env, name, value)
         else:
@@ -270,17 +268,17 @@ class VecNormalize:
             'gamma': self.gamma,
         }
         th.save(state, path)
-        print(f"VecNormalize stats saved to {path}")
     
-    def load(self, path: Union[str, Path]) -> None:
+    def load(self, path: Union[str, Path], verbose: bool = False) -> None:
         """Load normalization statistics."""
         path = Path(path)
         state = th.load(path, map_location=self.device)
         self.obs_rms.load_state_dict(state['obs_rms'])
         self.ret_rms.load_state_dict(state['ret_rms'])
-        print(f"VecNormalize stats loaded from {path}")
-        print(f"  Obs stats: mean range [{self.obs_rms.mean.min():.3f}, {self.obs_rms.mean.max():.3f}], "
-              f"std range [{self.obs_rms.std.min():.3f}, {self.obs_rms.std.max():.3f}]")
+        if verbose:
+            print(f"VecNormalize stats loaded from {path}")
+            print(f"  Obs stats: mean range [{self.obs_rms.mean.min():.3f}, {self.obs_rms.mean.max():.3f}], "
+                  f"std range [{self.obs_rms.std.min():.3f}, {self.obs_rms.std.max():.3f}]")
     
     def set_training(self, mode: bool) -> None:
         """Set training mode (whether to update statistics)."""
