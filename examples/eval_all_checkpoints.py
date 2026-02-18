@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from examples.demo_FinRL_Alpaca_VecEnv_CV import (
     AlpacaStockVecEnv, download_and_preprocess, df_to_arrays,
-    TRAIN_START, TRAIN_END, TEST_START, TEST_END
+    TEST_START, TEST_END
 )
 
 def evaluate_checkpoint(actor_path, val_env, num_days, initial_amount=1e6, gpu_id=0):
@@ -60,7 +60,7 @@ def evaluate_checkpoint(actor_path, val_env, num_days, initial_amount=1e6, gpu_i
     return np.array(account_values)
 
 
-def main(checkpoint_dir, gpu_id=0):
+def main(checkpoint_dir, gpu_id=0, beg_idx=None, end_idx=None):
     """Main evaluation loop."""
     print(f"\n{'='*70}")
     print(f"CHECKPOINT COMPARISON: {checkpoint_dir}")
@@ -82,9 +82,33 @@ def main(checkpoint_dir, gpu_id=0):
     df = download_and_preprocess(force_download=False)
     close_ary, tech_ary = df_to_arrays(df)
     num_days = close_ary.shape[0]
-    train_end_idx = int(num_days * 0.8)
-    test_days = num_days - train_end_idx
     
+    # Determine eval period: CLI args > fold_meta.json > 80/20 default
+    if beg_idx is not None and end_idx is not None:
+        train_end_idx = beg_idx
+        eval_end_idx = end_idx
+        print(f"Eval period (from CLI): [{beg_idx}:{end_idx}]")
+    else:
+        # Try to load fold metadata saved by CV script
+        import json
+        fold_meta_path = os.path.join(checkpoint_dir, 'fold_meta.json')
+        if os.path.exists(fold_meta_path):
+            with open(fold_meta_path) as f:
+                meta = json.load(f)
+            train_end_idx = meta['val_start']
+            eval_end_idx = meta['val_end']
+            print(f"Eval period (from fold_meta.json): [{train_end_idx}:{eval_end_idx}]")
+            print(f"  CV method: {meta.get('cv_method', 'unknown')}, "
+                  f"Fold: {meta.get('fold', '?')}")
+        else:
+            # Default: 80/20 split (matches main demo_FinRL_Alpaca_VecEnv.py)
+            train_end_idx = int(num_days * 0.8)
+            eval_end_idx = num_days
+            print(f"Eval period (default 80/20): [{train_end_idx}:{eval_end_idx}]")
+            print(f"  Tip: Use --beg-idx/--end-idx for CV fold evaluation,")
+            print(f"       or run CV script which saves fold_meta.json")
+    
+    test_days = eval_end_idx - train_end_idx
     print(f"Test period: {test_days} days")
     
     # Create validation env
@@ -94,7 +118,7 @@ def main(checkpoint_dir, gpu_id=0):
         cost_pct=1e-3,
         gamma=0.99,
         beg_idx=train_end_idx,
-        end_idx=num_days,
+        end_idx=eval_end_idx,
         num_envs=1,  # Single env for consistent evaluation
         gpu_id=gpu_id
     )
@@ -111,10 +135,15 @@ def main(checkpoint_dir, gpu_id=0):
         print(f"⚠️  WARNING: This appears to be a normalized run but vec_normalize.pt not found!")
         print(f"   Evaluation with raw observations may produce incorrect results.")
     
-    # Get baseline
+    # Get baseline - map eval indices back to dates for baseline fetching
+    dates = sorted(df['date'].unique())
+    eval_start_date = str(dates[train_end_idx])[:10] if train_end_idx < len(dates) else TEST_START
+    eval_end_date = str(dates[min(eval_end_idx - 1, len(dates) - 1)])[:10] if eval_end_idx <= len(dates) else TEST_END
+    print(f"Eval date range: {eval_start_date} to {eval_end_date}")
+    
     try:
         from finrl.plot import get_baseline
-        baseline_df = get_baseline(ticker='^DJI', start=TEST_START, end=TEST_END)
+        baseline_df = get_baseline(ticker='^DJI', start=eval_start_date, end=eval_end_date)
         baseline_values = baseline_df['close'] / baseline_df['close'].iloc[0] * 1e6
         baseline_return = (baseline_values.iloc[-1] / 1e6 - 1) * 100
         has_baseline = True
@@ -301,9 +330,13 @@ def main(checkpoint_dir, gpu_id=0):
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='Evaluate all checkpoints in a directory')
     parser.add_argument('--dir', type=str, required=True, help='Checkpoint directory')
     parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--beg-idx', type=int, default=None,
+                        help='Start index for eval period (overrides auto-detection)')
+    parser.add_argument('--end-idx', type=int, default=None,
+                        help='End index for eval period (overrides auto-detection)')
     args = parser.parse_args()
     
-    main(args.dir, args.gpu)
+    main(args.dir, args.gpu, beg_idx=args.beg_idx, end_idx=args.end_idx)

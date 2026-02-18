@@ -799,6 +799,23 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         if continue_train:
             print(f"   🔄 RESUMING from latest checkpoint in: {args.cwd}")
         
+        # Save fold metadata for eval_all_checkpoints.py auto-detection
+        import json
+        os.makedirs(args.cwd, exist_ok=True)
+        fold_meta = {
+            'cv_method': 'holdout',
+            'fold': 1,
+            'n_splits': 1,
+            'train_start': 0,
+            'train_end': train_end_idx,
+            'val_start': train_end_idx,
+            'val_end': num_days,
+            'agent': agent_name,
+            'use_vec_normalize': use_vec_normalize,
+        }
+        with open(os.path.join(args.cwd, 'fold_meta.json'), 'w') as f:
+            json.dump(fold_meta, f, indent=2)
+        
         train_agent(args, if_single_process=False)
         cwd = args.cwd
         # Note: VecNormalize stats are automatically saved by run.py if use_vec_normalize=True
