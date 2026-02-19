@@ -967,7 +967,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         if h200:
             num_envs = 2 ** 13  # 8192 parallel envs (4× more transitions per rollout)
             batch_size = 2048   # saturate H200 tensor cores (128→2048 = 16× larger updates)
-            break_step = int(2e6)  # scale with num_envs to maintain ~same update cycles
+            break_step = int(4e6)  # 1 rollout = 8192*446 = 3.65M steps; 4M ≈ 1 full rollout
         else:
             num_envs = 2 ** 11  # 2048 parallel envs
             batch_size = None   # use default (128)
