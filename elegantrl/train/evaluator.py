@@ -121,6 +121,8 @@ class Evaluator:
 
         if actor_path:
             th.save(actor, actor_path)  # save policy network in *.pt
+            # Also update act.pth so --continue always loads the latest actor
+            th.save(actor, f"{self.cwd}/act.pth")
             self.save_training_curve_jpg()
 
     def save_or_load_recoder(self, if_save: bool):

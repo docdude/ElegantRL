@@ -297,6 +297,19 @@ class AgentBase:
             elif os.path.isfile(file_path):
                 setattr(self, attr_name, th.load(file_path, map_location=self.device))
 
+        # Fallback: if act.pth was missing, load latest actor__*.pt checkpoint
+        if not if_save and not os.path.isfile(f"{cwd}/act.pth"):
+            import glob
+            actor_files = sorted(glob.glob(f"{cwd}/actor__*.pt"))
+            if actor_files:
+                latest = actor_files[-1]  # sorted by step number (zero-padded)
+                print(f"| act.pth not found, loading latest checkpoint: {os.path.basename(latest)}")
+                actor_module = th.load(latest, map_location=self.device)
+                if hasattr(actor_module, 'state_dict'):
+                    self.act.load_state_dict(actor_module.state_dict())
+                else:
+                    self.act.load_state_dict(actor_module)
+
 
 def get_optim_param(optimizer: th.optim) -> list:  # backup
     params_list = []
