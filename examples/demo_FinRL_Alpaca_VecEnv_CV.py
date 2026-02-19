@@ -1283,6 +1283,14 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         eqw_sharpe = compute_equal_weight_sharpe(close_ary, val_start, val_end)
         excess_sharpe = sharpe - eqw_sharpe
         
+        # Save daily returns for PBO analysis (matches FinRL_Crypto approach)
+        # PBO needs per-strategy (checkpoint/trial) return time series
+        fold_save_dir = os.path.dirname(actor_path) if actor_path else args.cwd
+        if fold_save_dir and os.path.isdir(fold_save_dir):
+            np.save(os.path.join(fold_save_dir, 'daily_returns.npy'), daily_pct_returns)
+            np.save(os.path.join(fold_save_dir, 'account_values.npy'), account_arr)
+            print(f"   | Saved daily_returns.npy ({len(daily_pct_returns)} days) for PBO")
+        
         fold_results.append({
             'fold': fold_num,
             'return': final_return,
@@ -1291,7 +1299,8 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
             'excess_sharpe': excess_sharpe,
             'dji_return': dji_return,
             'alpha': alpha,
-            'checkpoint': actor_path
+            'checkpoint': actor_path,
+            'daily_returns': daily_pct_returns,  # Keep in-memory for PBO
         })
         
         print(f"\n   Fold {fold_num} Results:")

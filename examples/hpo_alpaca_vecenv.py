@@ -340,7 +340,7 @@ def evaluate_agent(
     num_episodes: int = 1,
     device: str = 'cuda:0',
     vec_normalize_path: Optional[str] = None,
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, np.ndarray]:
     """
     Evaluate agent and compute Sharpe ratio.
     
@@ -356,6 +356,7 @@ def evaluate_agent(
         sharpe_ratio: Annualized Sharpe ratio (computed from actual portfolio returns)
         mean_return: Mean cumulative return (%)
         std_return: Std of returns across envs
+        daily_returns: Array of daily portfolio returns (for PBO analysis)
     """
     env = env_class(**env_args)
     initial_amount = env_args.get('initial_amount', 1e6)
@@ -424,7 +425,7 @@ def evaluate_agent(
         mean_return = (account_values[-1] / initial_amount - 1) * 100
         std_return = 0.0
     
-    return sharpe, mean_return, std_return
+    return sharpe, mean_return, std_return, daily_returns
 
 
 # =============================================================================
@@ -758,7 +759,7 @@ def train_and_evaluate(cfg: DictConfig) -> float:
             if os.path.exists(vnp):
                 vec_normalize_path = vnp
         
-        sharpe_agent, mean_ret, std_ret = evaluate_agent(
+        sharpe_agent, mean_ret, std_ret, val_daily_returns = evaluate_agent(
             actor=actor, env_class=AlpacaStockVecEnv, env_args=val_env_args,
             device=device, vec_normalize_path=vec_normalize_path,
         )
@@ -768,6 +769,17 @@ def train_and_evaluate(cfg: DictConfig) -> float:
         
         sharpe_agent_list.append(sharpe_agent)
         sharpe_bench_list.append(sharpe_bench)
+        
+        # Save daily returns for PBO analysis (FinRL_Crypto stores per-trial returns)
+        trial_returns_dir = os.path.join(
+            os.path.dirname(args.cwd), 'pbo_returns'
+        )
+        os.makedirs(trial_returns_dir, exist_ok=True)
+        np.save(
+            os.path.join(trial_returns_dir, 
+                        f'trial_{cfg.get("trial_id", "unknown")}_split_{split_idx}.npy'),
+            val_daily_returns
+        )
         
         print(f"  Split {split_idx}: Agent Sharpe={sharpe_agent:.4f}, Bench Sharpe={sharpe_bench:.4f}, "
               f"Excess={sharpe_agent - sharpe_bench:+.4f}, Return={mean_ret:.2f}%")

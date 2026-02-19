@@ -160,15 +160,20 @@ def evaluate_multiple_checkpoints(checkpoint_dir: str, gpu_id: int = 0,
         else:
             results[ckpt] = {'error': 'Failed to load'}
     
-    return results
+    return results, close_ary, train_end_idx, num_days
 
 
-def run_pbo_analysis(checkpoint_results: dict, min_variance: float = 1e-10):
+def run_pbo_analysis(checkpoint_results: dict, close_ary=None, 
+                     beg_idx: int = None, end_idx: int = None,
+                     min_variance: float = 1e-10):
     """
     Run PBO analysis on checkpoint results.
     
     Args:
         checkpoint_results: Dict of checkpoint evaluation results
+        close_ary: Close price array for EQW benchmark Sharpe calculation
+        beg_idx: Start index for eval period (for EQW benchmark)
+        end_idx: End index for eval period (for EQW benchmark)
         min_variance: Minimum variance to include a checkpoint (filters zero-trading checkpoints)
     """
     print(f"\n{'='*60}")
@@ -195,8 +200,23 @@ def run_pbo_analysis(checkpoint_results: dict, min_variance: float = 1e-10):
     # Create evaluator
     evaluator = DRLEvaluator(embargo_td=pd.Timedelta(days=5), n_splits=5)
     
+    # Compute EQW benchmark Sharpe for PBO threshold (FinRL_Crypto approach)
+    benchmark_sharpe = 0.0
+    if close_ary is not None and beg_idx is not None and end_idx is not None:
+        prices = close_ary[beg_idx:end_idx]
+        if len(prices) > 1:
+            daily_stock_returns = np.diff(prices, axis=0) / prices[:-1]
+            daily_portfolio_returns = daily_stock_returns.mean(axis=1)
+            if daily_portfolio_returns.std() > 1e-8:
+                benchmark_sharpe = float(
+                    daily_portfolio_returns.mean() / daily_portfolio_returns.std() * np.sqrt(252)
+                )
+            print(f"   EQW benchmark Sharpe: {benchmark_sharpe:.4f}")
+    
     # Compute PBO with valid results only
-    pbo_results = evaluator.compute_drl_pbo(valid_results, n_splits=8)
+    pbo_results = evaluator.compute_drl_pbo(
+        valid_results, n_splits=8, benchmark_sharpe=benchmark_sharpe
+    )
     
     return pbo_results
 
@@ -212,7 +232,9 @@ def main():
     print(f"   NOTE: Using same evaluation as eval_all_checkpoints.py (NO VecNormalize)")
     
     # Evaluate all checkpoints (no limit - include all)
-    all_results = evaluate_multiple_checkpoints(checkpoint_dir, max_checkpoints=None)
+    all_results, close_ary, train_end_idx, num_days = evaluate_multiple_checkpoints(
+        checkpoint_dir, max_checkpoints=None
+    )
     
     if not all_results:
         print("No results!")
@@ -233,9 +255,12 @@ def main():
         print(f"{name:<45} {res['cumulative_return']:>10.2f} "
               f"{res['sharpe_ratio']:>8.2f} {res['max_drawdown']:>8.2f}")
     
-    # Run PBO (with zero-variance filtering)
+    # Run PBO (with zero-variance filtering + EQW benchmark Sharpe)
     if len(valid_results) >= 2:
-        pbo_results = run_pbo_analysis(all_results)
+        pbo_results = run_pbo_analysis(
+            all_results, close_ary=close_ary,
+            beg_idx=train_end_idx, end_idx=num_days
+        )
         
         # DSR for best checkpoint
         print("\n" + "="*60)

@@ -46,6 +46,35 @@ warnings.filterwarnings('ignore')
 
 
 # =============================================================================
+# UTILITY: PAD RETURN ARRAYS TO EQUAL LENGTH (matches FinRL_Crypto approach)
+# =============================================================================
+
+def pad_returns_to_equal_length(return_arrays: list) -> np.ndarray:
+    """
+    Pad return arrays to equal length by repeating the last value.
+    
+    This matches FinRL_Crypto's add_samples_equify_array_length().
+    Preserves more data than truncation (which drops from all arrays
+    to match the shortest one).
+    
+    Args:
+        return_arrays: List of 1D arrays with potentially different lengths
+        
+    Returns:
+        2D array of shape (max_length, n_arrays)
+    """
+    max_length = max(len(r) for r in return_arrays)
+    n_arrays = len(return_arrays)
+    result = np.empty((max_length, n_arrays))
+    for idx, row in enumerate(return_arrays):
+        padded = row.copy() if isinstance(row, np.ndarray) else np.array(row)
+        if len(padded) < max_length:
+            padded = np.append(padded, np.repeat(padded[-1], max_length - len(padded)))
+        result[:, idx] = padded
+    return result
+
+
+# =============================================================================
 # PROPER PURGE/EMBARGO FUNCTIONS (from FinRL_Crypto / López de Prado)
 # =============================================================================
 
@@ -501,7 +530,8 @@ class DRLEvaluator:
     # =========================================================================
     
     def compute_drl_pbo(self, checkpoint_results: Dict[str, Dict],
-                        n_splits: int = 16) -> Dict:
+                        n_splits: int = 16,
+                        benchmark_sharpe: float = 0.0) -> Dict:
         """
         Compute PBO across multiple DRL checkpoints.
         
@@ -512,6 +542,10 @@ class DRLEvaluator:
             checkpoint_results: Dict from evaluate_checkpoints_directory()
                 Maps checkpoint_name -> {'daily_returns': array, ...}
             n_splits: Number of CSCV splits (must be even)
+            benchmark_sharpe: EQW benchmark Sharpe as PBO threshold.
+                              If > 0, prob_oos_loss measures probability of
+                              underperforming passive portfolio (like FinRL_Crypto).
+                              Default 0 = probability of negative OOS Sharpe.
             
         Returns:
             PBO results dictionary
@@ -531,27 +565,29 @@ class DRLEvaluator:
                 'interpretation': 'N/A - Need multiple checkpoints'
             }
         
-        # Find minimum length (align all returns)
-        min_len = min(len(v['daily_returns']) for v in valid_checkpoints.values())
-        
-        # Build returns matrix: (observations x strategies)
+        # Pad returns to equal length (FinRL_Crypto approach: preserves more data)
         checkpoint_names = list(valid_checkpoints.keys())
-        strategy_returns = np.column_stack([
-            valid_checkpoints[name]['daily_returns'][:min_len]
+        return_arrays = [
+            valid_checkpoints[name]['daily_returns']
             for name in checkpoint_names
-        ])
+        ]
+        strategy_returns = pad_returns_to_equal_length(return_arrays)
         
         print(f"   Checkpoints: {len(checkpoint_names)}")
-        print(f"   Trading days: {min_len}")
+        print(f"   Trading days: {strategy_returns.shape[0]} (padded to max)")
         print(f"   Matrix shape: {strategy_returns.shape}")
+        if benchmark_sharpe > 0:
+            print(f"   Benchmark Sharpe threshold: {benchmark_sharpe:.4f}")
         
         # Use pypbo's pbo function
         return self.probability_backtest_overfitting(
-            strategy_returns, n_splits=n_splits
+            strategy_returns, n_splits=n_splits,
+            benchmark_sharpe=benchmark_sharpe
         )
     
     def compute_pbo_from_hyperparameters(self, hp_results: List[Dict],
-                                         n_splits: int = 16) -> Dict:
+                                         n_splits: int = 16,
+                                         benchmark_sharpe: float = 0.0) -> Dict:
         """
         Compute PBO across hyperparameter optimization trials.
         
@@ -561,6 +597,7 @@ class DRLEvaluator:
         Args:
             hp_results: List of dicts, each with 'daily_returns' array
             n_splits: Number of CSCV splits
+            benchmark_sharpe: EQW benchmark Sharpe threshold (0 = prob of loss)
             
         Returns:
             PBO results
@@ -571,25 +608,26 @@ class DRLEvaluator:
             print("⚠️  Need at least 2 HP trials for PBO")
             return {'pbo': None, 'interpretation': 'N/A'}
         
-        # Find minimum length
-        min_len = min(len(r['daily_returns']) for r in hp_results 
-                      if 'daily_returns' in r)
-        
-        # Build returns matrix
-        strategy_returns = np.column_stack([
-            r['daily_returns'][:min_len] for r in hp_results
+        # Pad returns to equal length (FinRL_Crypto approach)
+        return_arrays = [
+            r['daily_returns'] for r in hp_results
             if 'daily_returns' in r
-        ])
+        ]
+        strategy_returns = pad_returns_to_equal_length(return_arrays)
         
         print(f"   HP trials: {strategy_returns.shape[1]}")
-        print(f"   Trading days: {min_len}")
+        print(f"   Trading days: {strategy_returns.shape[0]} (padded to max)")
+        if benchmark_sharpe > 0:
+            print(f"   Benchmark Sharpe threshold: {benchmark_sharpe:.4f}")
         
         return self.probability_backtest_overfitting(
-            strategy_returns, n_splits=n_splits
+            strategy_returns, n_splits=n_splits,
+            benchmark_sharpe=benchmark_sharpe
         )
     
     def probability_backtest_overfitting(self, strategy_returns: np.ndarray,
-                                         n_splits: int = 16) -> Dict:
+                                         n_splits: int = 16,
+                                         benchmark_sharpe: float = 0.0) -> Dict:
         """
         Calculate PBO using pypbo library (López de Prado implementation).
         
@@ -599,6 +637,11 @@ class DRLEvaluator:
         Args:
             strategy_returns: Matrix (T_observations x N_strategies)
             n_splits: Number of CSCV splits (must be even)
+            benchmark_sharpe: EQW benchmark Sharpe used as threshold for
+                             prob_oos_loss. If > 0, measures probability of
+                             underperforming passive portfolio (FinRL_Crypto
+                             approach). Default 0 = probability of negative
+                             OOS Sharpe.
             
         Returns:
             PBO statistics including probability, logits, and diagnostics
@@ -614,6 +657,10 @@ class DRLEvaluator:
             return {'pbo': None, 'interpretation': 'Need ≥2 strategies'}
         
         print(f"   Shape: ({n_observations} obs, {n_strategies} strategies)")
+        if benchmark_sharpe > 0:
+            print(f"   Threshold: {benchmark_sharpe:.4f} (EQW benchmark Sharpe)")
+        else:
+            print(f"   Threshold: 0 (probability of negative OOS Sharpe)")
         
         # Define metric (Sharpe ratio)
         def metric_func(returns):
@@ -624,7 +671,7 @@ class DRLEvaluator:
                 M=strategy_returns,
                 S=n_splits,
                 metric_func=metric_func,
-                threshold=0,
+                threshold=benchmark_sharpe,  # EQW benchmark (0 = prob of loss)
                 n_jobs=-1,
                 verbose=False,
                 plot=False
@@ -638,6 +685,7 @@ class DRLEvaluator:
                 'std_logit': np.std(pbo_result.logits),
                 'n_strategies': n_strategies,
                 'n_splits': len(pbo_result.logits),
+                'benchmark_sharpe': benchmark_sharpe,
                 'performance_degradation': {
                     'slope': pbo_result.linear_model.slope,
                     'r_squared': pbo_result.linear_model.rvalue ** 2,
@@ -650,7 +698,8 @@ class DRLEvaluator:
             print(f"   Strategies: {results['n_strategies']}")
             print(f"   CSCV splits: {results['n_splits']}")
             print(f"   PBO: {results['pbo']:.3f}")
-            print(f"   Prob OOS Loss: {results['prob_oos_loss']:.3f}")
+            threshold_label = f"EQW={benchmark_sharpe:.4f}" if benchmark_sharpe > 0 else "Sharpe<0"
+            print(f"   Prob OOS Loss ({threshold_label}): {results['prob_oos_loss']:.3f}")
             print(f"   Mean λ: {results['mean_logit']:.3f}")
             print(f"   Degradation: slope={results['performance_degradation']['slope']:.3f}")
             print(f"   {results['interpretation']}")
@@ -671,6 +720,118 @@ class DRLEvaluator:
             return "🔴 High overfitting risk - Results questionable"
         else:
             return "🚨 Very high overfitting risk - Likely spurious"
+    
+    # =========================================================================
+    # LOADING SAVED FOLD / TRIAL RETURNS FOR PBO
+    # =========================================================================
+    
+    @staticmethod
+    def load_fold_returns(base_dir: str, pattern: str = 'daily_returns.npy') -> Dict:
+        """
+        Load saved daily returns from CV fold directories.
+        
+        The CV script (demo_FinRL_Alpaca_VecEnv_CV.py) saves daily_returns.npy
+        and fold_meta.json in each fold's checkpoint directory.
+        
+        Args:
+            base_dir: Parent directory containing fold subdirectories
+                      e.g., 'AlpacaStockVecEnv-v1_PPO_cpcv/'
+            pattern: Filename of saved returns (default: daily_returns.npy)
+            
+        Returns:
+            Dict with 'fold_returns' (list of arrays), 'fold_meta' (list of dicts),
+            'benchmark_sharpe' (mean EQW Sharpe from fold_meta)
+        """
+        import json
+        base_dir = Path(base_dir)
+        
+        fold_returns = []
+        fold_meta_list = []
+        
+        # Search for fold directories (fold_1, fold_2, etc. or direct subdirs)
+        candidates = sorted(base_dir.iterdir()) if base_dir.is_dir() else []
+        
+        for subdir in candidates:
+            if not subdir.is_dir():
+                continue
+            returns_file = subdir / pattern
+            if returns_file.exists():
+                returns = np.load(str(returns_file))
+                fold_returns.append(returns)
+                
+                # Load fold metadata if available
+                meta_file = subdir / 'fold_meta.json'
+                if meta_file.exists():
+                    with open(meta_file) as f:
+                        fold_meta_list.append(json.load(f))
+                
+                print(f"   Loaded {subdir.name}: {len(returns)} days")
+        
+        if not fold_returns:
+            print(f"⚠️  No {pattern} files found in {base_dir}")
+            return {'fold_returns': [], 'fold_meta': [], 'benchmark_sharpe': 0.0}
+        
+        print(f"✅ Loaded {len(fold_returns)} fold return series")
+        
+        return {
+            'fold_returns': fold_returns,
+            'fold_meta': fold_meta_list,
+        }
+    
+    @staticmethod
+    def load_hpo_trial_returns(pbo_returns_dir: str) -> List[Dict]:
+        """
+        Load saved HPO trial returns for PBO analysis.
+        
+        The HPO script (hpo_alpaca_vecenv.py) saves per-trial/split returns as
+        trial_{id}_split_{idx}.npy in a pbo_returns/ directory.
+        
+        For PBO, we need one return series per trial (averaged across splits,
+        matching FinRL_Crypto's build_matrix_M_splits approach).
+        
+        Args:
+            pbo_returns_dir: Directory with trial_*_split_*.npy files
+            
+        Returns:
+            List of dicts with 'daily_returns' array per trial
+        """
+        pbo_dir = Path(pbo_returns_dir)
+        if not pbo_dir.is_dir():
+            print(f"⚠️  PBO returns directory not found: {pbo_returns_dir}")
+            return []
+        
+        # Group files by trial
+        from collections import defaultdict
+        trial_files = defaultdict(list)
+        for f in sorted(pbo_dir.glob('trial_*_split_*.npy')):
+            # Extract trial ID from filename: trial_{id}_split_{idx}.npy
+            parts = f.stem.split('_')
+            trial_id = '_'.join(parts[1:-2])  # Everything between 'trial_' and '_split_'
+            trial_files[trial_id].append(f)
+        
+        if not trial_files:
+            print(f"⚠️  No trial return files found in {pbo_returns_dir}")
+            return []
+        
+        hp_results = []
+        for trial_id, files in sorted(trial_files.items()):
+            # Load all splits for this trial
+            split_returns = [np.load(str(f)) for f in files]
+            
+            # Average across splits (matching FinRL_Crypto's build_matrix_M_splits)
+            padded = pad_returns_to_equal_length(split_returns)
+            avg_returns = padded.mean(axis=1)
+            
+            hp_results.append({
+                'trial_id': trial_id,
+                'daily_returns': avg_returns,
+                'n_splits': len(files)
+            })
+            print(f"   Trial {trial_id}: {len(files)} splits, "
+                  f"{len(avg_returns)} days (avg)")
+        
+        print(f"✅ Loaded {len(hp_results)} trial return series")
+        return hp_results
     
     # =========================================================================
     # DEFLATED SHARPE RATIO (DSR) FOR DRL

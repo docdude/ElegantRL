@@ -360,7 +360,8 @@ class LopezDePradoEvaluator:
     
     def probability_backtest_overfitting(self, strategy_returns: np.ndarray,
                                        n_splits: int = 16,
-                                       selection_freq: float = 0.5) -> Dict:
+                                       selection_freq: float = 0.5,
+                                       benchmark_sharpe: float = 0.0) -> Dict:
         """
         Calculate PBO using pypbo library (López de Prado implementation).
         
@@ -372,6 +373,11 @@ class LopezDePradoEvaluator:
                 Already in correct format for pypbo (observations x strategies)
             n_splits: Number of combinatorial splits (must be even, def 16)
             selection_freq: Not used, kept for API compatibility
+            benchmark_sharpe: EQW benchmark Sharpe used as threshold for
+                             prob_oos_loss. If > 0, measures probability of
+                             underperforming passive portfolio (FinRL_Crypto
+                             approach). Default 0 = probability of negative
+                             OOS Sharpe.
             
         Returns:
             PBO statistics including probability, logits, and diagnostics
@@ -411,7 +417,7 @@ class LopezDePradoEvaluator:
                 M=M,
                 S=n_splits,
                 metric_func=metric_func,
-                threshold=0,  # For Sharpe, 0 = prob of loss
+                threshold=benchmark_sharpe,  # EQW benchmark (0 = prob of loss)
                 n_jobs=-1,
                 verbose=False,
                 plot=False
@@ -426,6 +432,7 @@ class LopezDePradoEvaluator:
                 'std_logit': np.std(pbo_result.logits),
                 'n_strategies': M.shape[1],
                 'n_splits': len(pbo_result.logits),
+                'benchmark_sharpe': benchmark_sharpe,
                 'performance_degradation': {
                     'slope': pbo_result.linear_model.slope,
                     'r_squared': pbo_result.linear_model.rvalue ** 2,
@@ -439,7 +446,8 @@ class LopezDePradoEvaluator:
             print(f"   CSCV splits: {results['n_splits']}")
             print(f"   Probability of Backtest Overfitting: "
                   f"{results['pbo']:.3f}")
-            print(f"   Prob. of OOS Loss: "
+            threshold_label = f"EQW={benchmark_sharpe:.4f}" if benchmark_sharpe > 0 else "Sharpe<0"
+            print(f"   Prob. of OOS Loss ({threshold_label}): "
                   f"{results['prob_oos_loss']:.3f}")
             print(f"   Mean logit (λ): {results['mean_logit']:.3f}")
             print(f"   Performance degradation: "
