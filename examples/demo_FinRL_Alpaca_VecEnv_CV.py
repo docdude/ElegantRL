@@ -967,7 +967,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         if h200:
             num_envs = 2 ** 14  # 16384 parallel envs — fill H200 144GB HBM3e
             batch_size = 4096   # saturate H200 tensor cores with large batches
-            break_step = int(8e6)  # 1 rollout = 16384*~445 = 7.3M steps; 8M ≈ 1 full rollout
+            break_step = int(2e6)  # 29M transitions/rollout → converges ~600K steps; 2M gives margin
         else:
             num_envs = 2 ** 11  # 2048 parallel envs
             batch_size = None   # use default (128)
