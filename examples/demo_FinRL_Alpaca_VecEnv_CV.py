@@ -577,9 +577,9 @@ def run_backtest_with_stats(env, actor, num_days: int, num_envs: int,
 # CONFIGURATION
 # =============================================================================
 
-# Alpaca API Credentials (replace with your own)
-API_KEY = "PKP504QUJP2PBLNQ0XWT"
-API_SECRET = "OdbB6bGJRiHjeZoQEoBgQQD5pj7VJG2vxPNk9bY3"
+# Alpaca API Credentials (set via environment variables)
+API_KEY = os.environ.get("ALPACA_API_KEY", "")
+API_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 
 # Stock universe - DOW 30 (or customize)
 TICKERS = [

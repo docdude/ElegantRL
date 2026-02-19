@@ -4,8 +4,10 @@ https://github.com/AI4Finance-Foundation/FinRL-Meta/blob/master/examples/FinRL_P
 
 """Part I"""
 
-API_KEY = "PKAVSDVA8AIK4YBOOL3S"
-API_SECRET = "U6TKEjt9C77Dw21ca8zVGUhsZxTUohaLYdmOrO3L"
+import os
+
+API_KEY = os.environ.get("ALPACA_API_KEY", "")
+API_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 API_BASE_URL = 'https://paper-api.alpaca.markets'
 data_url = 'wss://data.alpaca.markets'
 
