@@ -272,7 +272,7 @@ class VecNormalize:
     def load(self, path: Union[str, Path], verbose: bool = False) -> None:
         """Load normalization statistics."""
         path = Path(path)
-        state = th.load(path, map_location=self.device)
+        state = th.load(path, map_location=self.device, weights_only=False)
         self.obs_rms.load_state_dict(state['obs_rms'])
         self.ret_rms.load_state_dict(state['ret_rms'])
         if verbose:

@@ -201,7 +201,7 @@ class ReplayBuffer:  # for off-policy
             for item, name in item_names:
                 file_path = f"{cwd}/replay_buffer_{name}.pth"
                 print(f"| buffer.save_or_load_history(): Load {file_path}", flush=True)
-                buf_item = th.load(file_path)
+                buf_item = th.load(file_path, weights_only=True)
 
                 max_size = buf_item.shape[0]
                 item[:max_size] = buf_item

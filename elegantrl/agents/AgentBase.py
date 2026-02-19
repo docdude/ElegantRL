@@ -295,7 +295,7 @@ class AgentBase:
             if if_save:
                 th.save(getattr(self, attr_name), file_path)
             elif os.path.isfile(file_path):
-                setattr(self, attr_name, th.load(file_path, map_location=self.device))
+                setattr(self, attr_name, th.load(file_path, map_location=self.device, weights_only=False))
 
         # Fallback: if act.pth was missing, load latest actor__*.pt checkpoint
         if not if_save and not os.path.isfile(f"{cwd}/act.pth"):
@@ -304,7 +304,7 @@ class AgentBase:
             if actor_files:
                 latest = actor_files[-1]  # sorted by step number (zero-padded)
                 print(f"| act.pth not found, loading latest checkpoint: {os.path.basename(latest)}")
-                actor_module = th.load(latest, map_location=self.device)
+                actor_module = th.load(latest, map_location=self.device, weights_only=False)
                 if hasattr(actor_module, 'state_dict'):
                     self.act.load_state_dict(actor_module.state_dict())
                 else:

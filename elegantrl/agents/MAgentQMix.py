@@ -220,8 +220,8 @@ class AgentQMix:
         self.target_mac.load_models(path)
         if self.mixer is not None:
             self.mixer.load_state_dict(
-                th.load(f"{path}/mixer.th", map_location=lambda storage, loc: storage)
+                th.load(f"{path}/mixer.th", map_location=lambda storage, loc: storage, weights_only=True)
             )
         self.optimiser.load_state_dict(
-            th.load(f"{path}/opt.th", map_location=lambda storage, loc: storage)
+            th.load(f"{path}/opt.th", map_location=lambda storage, loc: storage, weights_only=True)
         )

@@ -171,7 +171,7 @@ def get_rewards_and_steps(env, actor, if_render: bool = False) -> Tuple[float, i
 
     env = build_env(env_class=env_class, env_args=env_args)
     actor = agent(net_dim, env.state_dim, env.action_dim, gpu_id=gpu_id).act
-    actor.load_state_dict(th.load(actor_path, map_location=lambda storage, loc: storage))
+    actor.load_state_dict(th.load(actor_path, map_location=lambda storage, loc: storage, weights_only=True))
 
     r_s_ary = [get_episode_return_and_step(env, act) for _ in range(eval_times)]
     r_s_ary = np.array(r_s_ary, dtype=np.float32)
@@ -401,7 +401,7 @@ def demo_evaluate_actors(dir_path: str, gpu_id: int, agent, env_args: dict, eval
     for act_name in act_names:
         act_path = f"{dir_path}/{act_name}"
 
-        act.load_state_dict(th.load(act_path, map_location=lambda storage, loc: storage))
+        act.load_state_dict(th.load(act_path, map_location=lambda storage, loc: storage, weights_only=True))
         r_s_ary = [get_rewards_and_steps(env, act) for _ in range(eval_times)]
         r_s_ary = np.array(r_s_ary, dtype=np.float32)
         r_avg, s_avg = r_s_ary.mean(axis=0)  # average of episode return and episode step
