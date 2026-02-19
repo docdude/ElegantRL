@@ -871,7 +871,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         run_suffix: str = None, use_best_checkpoint: bool = False,
         cv_method: str = 'holdout', n_folds: int = 3, gap_days: int = 0,
         n_groups: int = 5, n_test_groups: int = 2, embargo_pct: float = 0.01,
-        continue_train: bool = False):
+        continue_train: bool = False, h200: bool = False):
     """Main training function using Alpaca data with ElegantRL VecEnv.
     
     Args:
@@ -957,17 +957,30 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         break_step = int(5e5)
         print(f"   ⚡ Off-policy mode: num_envs={num_envs}, buffer_size={buffer_size:,} (~12GB buffer)")
     else:
-        num_envs = 2 ** 11  # 2048 parallel envs
-        batch_size = None   # use default
+        # On-policy config: --h200 maximizes H200 GPU utilization
+        # Buffer shape: (horizon_len, num_envs, ~315 floats) × 4 bytes
+        # Default: 2048 envs × 446 horizon × 1.2KB = 1.2 GB buffer (fits any GPU)
+        # H200:    8192 envs × 446 horizon × 1.2KB = 4.6 GB buffer (still light)
+        #   Key win: 4× more transitions/rollout + batch_size=2048 saturates tensor cores
+        # net_dims stays at [128,64] — architecture is an HPO parameter, not a GPU tier.
+        # This also ensures --h200 + --continue is safe (checkpoint shapes match).
+        if h200:
+            num_envs = 2 ** 13  # 8192 parallel envs (4× more transitions per rollout)
+            batch_size = 2048   # saturate H200 tensor cores (128→2048 = 16× larger updates)
+            break_step = int(2e6)  # scale with num_envs to maintain ~same update cycles
+        else:
+            num_envs = 2 ** 11  # 2048 parallel envs
+            batch_size = None   # use default (128)
+            break_step = int(1e6)
+        net_dims = [128, 64]  # HPO parameter — do not tie to GPU tier
         buffer_size = None  # on-policy doesn't use large buffer
         soft_update_tau = None  # Not used by on-policy
         repeat_times = 16
         learning_rate = 1e-4  # Reduced from 2e-4 for stability with large advantages
-        net_dims = [128, 64]
         state_value_tau = 0.1  # Will be overridden to 0 if using VecNormalize
         lambda_entropy = 0.01  # Entropy coefficient for exploration (default 0.001 is too low)
-        break_step = int(4e6)  # Extended from 1e6 - PPO benefits from longer training
-        print(f"   🚀 On-policy mode: num_envs={num_envs}, lr={learning_rate}, entropy={lambda_entropy}")
+        print(f"   🚀 On-policy mode: num_envs={num_envs}, batch_size={batch_size or 128}, "
+              f"net_dims={net_dims}, break_step={break_step:,}")
     
     # If using VecNormalize, disable agent's internal state normalization to avoid double-normalization
     if use_vec_normalize and state_value_tau > 0:
@@ -1081,6 +1094,8 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
             # On-policy specific settings (PPO/A2C)
             # Explicit defaults matching HPO script (agent getattr fallbacks are the same,
             # but being explicit prevents silent drift if agent defaults ever change)
+            if batch_size is not None:
+                args.batch_size = batch_size  # H200: 2048 to saturate tensor cores
             args.lambda_entropy = lambda_entropy
             args.ratio_clip = 0.25           # PPO clip range: ratio.clamp(1-clip, 1+clip)
             args.lambda_gae_adv = 0.95       # GAE lambda for advantage estimation
@@ -1117,6 +1132,9 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
             if is_off_policy:
                 print(f"   batch_size: {batch_size}")
                 print(f"   buffer_size: {buffer_size:,}")
+            elif batch_size is not None:
+                print(f"   batch_size: {batch_size} (H200 mode)")
+                print(f"   net_dims: {net_dims}")
             if continue_train:
                 print(f"   🔄 RESUMING from latest checkpoint in: {args.cwd}")
             
@@ -1480,6 +1498,8 @@ if __name__ == '__main__':
                         help='Purging gap between train/val (holdout/wf only)')
     parser.add_argument('--continue', action='store_true', dest='continue_train',
                         help='Resume training from latest checkpoint (loads actor + VecNormalize stats)')
+    parser.add_argument('--h200', action='store_true',
+                        help='Maximize on-policy GPU utilization for H200 (8192 envs, batch_size=2048). Safe with --continue.')
     args = parser.parse_args()
     
     print(f"\n{'='*60}")
@@ -1510,4 +1530,5 @@ if __name__ == '__main__':
         use_best_checkpoint=args.best, cv_method=args.cv_method,
         n_folds=args.folds, gap_days=args.gap_days,
         n_groups=args.n_groups, n_test_groups=args.n_test_groups,
-        embargo_pct=args.embargo_pct, continue_train=args.continue_train)
+        embargo_pct=args.embargo_pct, continue_train=args.continue_train,
+        h200=args.h200)
