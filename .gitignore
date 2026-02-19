@@ -38,3 +38,4 @@ datasets/
 # Scratch / temp
 full_diff.patch
 notebooks/
+.env
