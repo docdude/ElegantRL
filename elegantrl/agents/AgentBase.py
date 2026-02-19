@@ -283,19 +283,45 @@ class AgentBase:
 
         cwd: Current Working Directory. ElegantRL save training files in CWD.
         if_save: True: save files. False: load files.
+
+        Models (act, cri, act_target, cri_target) are saved as full modules
+        for compatibility with evaluator/eval scripts that load them directly.
+        On load, we use load_state_dict() to preserve parameter identity so
+        optimizers remain connected to the correct tensors.
+
+        Optimizers are saved as state_dict() and loaded via load_state_dict()
+        into the existing optimizer (which already references model parameters).
         """
         assert self.save_attr_names.issuperset({'act', 'act_optimizer'})
 
         for attr_name in self.save_attr_names:
             file_path = f"{cwd}/{attr_name}.pth"
+            obj = getattr(self, attr_name)
 
-            if getattr(self, attr_name) is None:
+            if obj is None:
                 continue
 
+            is_optimizer = 'optimizer' in attr_name
+
             if if_save:
-                th.save(getattr(self, attr_name), file_path)
+                if is_optimizer:
+                    th.save(obj.state_dict(), file_path)
+                else:
+                    th.save(obj, file_path)  # full module for evaluator compatibility
             elif os.path.isfile(file_path):
-                setattr(self, attr_name, th.load(file_path, map_location=self.device, weights_only=False))
+                if is_optimizer:
+                    loaded = th.load(file_path, map_location=self.device, weights_only=True)
+                    # Handle both old format (full optimizer) and new format (state_dict)
+                    if hasattr(loaded, 'state_dict'):
+                        obj.load_state_dict(loaded.state_dict())
+                    else:
+                        obj.load_state_dict(loaded)
+                else:
+                    loaded = th.load(file_path, map_location=self.device, weights_only=False)
+                    if hasattr(loaded, 'state_dict'):
+                        obj.load_state_dict(loaded.state_dict())
+                    else:
+                        obj.load_state_dict(loaded)
 
         # Fallback: if act.pth was missing, load latest actor__*.pt checkpoint
         if not if_save and not os.path.isfile(f"{cwd}/act.pth"):
