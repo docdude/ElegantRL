@@ -641,7 +641,8 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     
     # 4. Configure training
     gamma = 0.99
-    max_step = num_days - train_end_idx - 1  # validation period length
+    train_max_step = train_end_idx - 1              # training episode length
+    val_max_step = num_days - train_end_idx - 1      # validation episode length
     
     # Off-policy agents need reduced parameters to avoid OOM
     # ReplayBuffer shape: (buffer_size, num_envs, state_dim) - memory scales with BOTH!
@@ -650,7 +651,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     if is_off_policy:
         num_envs = 96       # 96 envs (fits on L4 24GB with large buffer)
         batch_size = 256
-        horizon_len = max_step // 4
+        horizon_len = val_max_step // 4
         buffer_size = int(1.9e5)  # 100K - buffer is (100K, 96, 283) = ~12GB
         repeat_times = 2.0      # more gradient updates per sample (like demo_DDPG_TD3_SAC)
         learning_rate = 1e-4    # slightly lower for stability
@@ -663,20 +664,20 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         # On-policy config: --h200 maximizes H200 GPU utilization
         # Buffer shape: (horizon_len, num_envs, ~315 floats) × 4 bytes
         # Default: 2048 envs × ~150 horizon × 1.2KB = 0.4 GB buffer (fits any GPU)
-        # H200:    8192 envs × ~150 horizon × 1.2KB = 1.5 GB buffer (still light)
+        # H200:   16384 envs × ~150 horizon × 1.2KB = 2.9 GB buffer (fills H200 144GB)
         #   Key win: 4× more transitions/rollout + batch_size=2048 saturates tensor cores
         # net_dims stays at [128,64] — architecture is an HPO parameter, not a GPU tier.
         # This also ensures --h200 + --continue is safe (checkpoint shapes match).
         if h200:
-            num_envs = 2 ** 13  # 8192 parallel envs (4× more transitions per rollout)
-            batch_size = 2048   # saturate H200 tensor cores (128→2048 = 16× larger updates)
-            break_step = int(4e6)  # 1 rollout = 8192*446 = 3.65M steps; 4M ≈ 1 full rollout
+            num_envs = 2 ** 14  # 16384 parallel envs — fill H200 144GB HBM3e
+            batch_size = 4096   # saturate H200 tensor cores with large batches
+            break_step = int(8e6)  # 1 rollout = 16384*~445 = 7.3M steps; 8M ≈ 1 full rollout
         else:
             num_envs = 2 ** 11  # 2048 parallel envs
             batch_size = None   # use default (128)
             break_step = int(1e6)
         net_dims = [128, 64]  # HPO parameter — do not tie to GPU tier
-        horizon_len = max_step
+        horizon_len = train_max_step
         buffer_size = None  # on-policy doesn't use large buffer
         repeat_times = 16
         learning_rate = 1e-4  # Reduced from 2e-4 for stability with large advantages
@@ -719,7 +720,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     env_args = {
         'env_name': 'AlpacaStockVecEnv-v1',
         'num_envs': num_envs,
-        'max_step': max_step,
+        'max_step': train_max_step,
         'state_dim': state_dim,
         'action_dim': action_dim,
         'if_discrete': False,
@@ -767,7 +768,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         # Explicit defaults matching HPO script (agent getattr fallbacks are the same,
         # but being explicit prevents silent drift if agent defaults ever change)
         if batch_size is not None:
-            args.batch_size = batch_size  # H200: 2048 to saturate tensor cores
+            args.batch_size = batch_size  # H200: 4096 to saturate tensor cores
         args.lambda_entropy = lambda_entropy  # Entropy coefficient for exploration
         args.ratio_clip = 0.25           # PPO clip range: ratio.clamp(1-clip, 1+clip)
         args.lambda_gae_adv = 0.95       # GAE lambda for advantage estimation
@@ -788,7 +789,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     args.eval_env_args = {
         'env_name': 'AlpacaStockVecEnv-v1',
         'num_envs': num_envs,
-        'max_step': max_step,
+        'max_step': val_max_step,
         'state_dim': state_dim,
         'action_dim': action_dim,
         'if_discrete': False,

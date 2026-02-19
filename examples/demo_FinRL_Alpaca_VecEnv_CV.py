@@ -943,7 +943,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     # ReplayBuffer shape: (buffer_size, num_envs, state_dim) - memory scales with BOTH!
     # L4 (24GB): num_envs=96, buffer_size=100K = ~12GB buffer + ~10GB overhead = fits
     # Prioritize large buffer for SAC - more important than num_envs for off-policy
-    # Note: horizon_len will be set per-fold based on val period length
+    # Note: horizon_len will be set per-fold based on train period length
     if is_off_policy:
         num_envs = 96       # 96 envs (fits on L4 24GB with large buffer)
         batch_size = 256
@@ -959,15 +959,15 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     else:
         # On-policy config: --h200 maximizes H200 GPU utilization
         # Buffer shape: (horizon_len, num_envs, ~315 floats) × 4 bytes
-        # Default: 2048 envs × 446 horizon × 1.2KB = 1.2 GB buffer (fits any GPU)
-        # H200:    8192 envs × 446 horizon × 1.2KB = 4.6 GB buffer (still light)
-        #   Key win: 4× more transitions/rollout + batch_size=2048 saturates tensor cores
+        # Default: 2048 envs × ~445 horizon × 1.2KB = 1.1 GB buffer (fits any GPU)
+        # H200:   16384 envs × ~445 horizon × 1.2KB = 8.7 GB buffer (fills H200 144GB)
+        #   Key win: 8× more transitions/rollout + batch_size=4096 saturates tensor cores
         # net_dims stays at [128,64] — architecture is an HPO parameter, not a GPU tier.
         # This also ensures --h200 + --continue is safe (checkpoint shapes match).
         if h200:
-            num_envs = 2 ** 13  # 8192 parallel envs (4× more transitions per rollout)
-            batch_size = 2048   # saturate H200 tensor cores (128→2048 = 16× larger updates)
-            break_step = int(4e6)  # 1 rollout = 8192*446 = 3.65M steps; 4M ≈ 1 full rollout
+            num_envs = 2 ** 14  # 16384 parallel envs — fill H200 144GB HBM3e
+            batch_size = 4096   # saturate H200 tensor cores with large batches
+            break_step = int(8e6)  # 1 rollout = 16384*~445 = 7.3M steps; 8M ≈ 1 full rollout
         else:
             num_envs = 2 ** 11  # 2048 parallel envs
             batch_size = None   # use default (128)
@@ -1030,10 +1030,11 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         train_end = train_ranges[-1][1]
         val_start = val_ranges[0][0]
         val_end = val_ranges[-1][1]
-        max_step = val_end - val_start - 1
+        train_max_step = train_end - train_start - 1  # training episode length
+        val_max_step = val_end - val_start - 1        # validation episode length
         
-        if max_step < 2:
-            print(f"\n  Fold {fold_num}: skipping (val too short: {max_step+1} days)")
+        if val_max_step < 2:
+            print(f"\n  Fold {fold_num}: skipping (val too short: {val_max_step+1} days)")
             fold_results.append({'fold': fold_num, 'return': None, 'sharpe': None})
             continue
         
@@ -1045,7 +1046,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         env_args = {
             'env_name': 'AlpacaStockVecEnv-v1',
             'num_envs': num_envs,
-            'max_step': max_step,
+            'max_step': train_max_step,
             'state_dim': state_dim,
             'action_dim': action_dim,
             'if_discrete': False,
@@ -1079,8 +1080,8 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         args.break_step = break_step
         args.net_dims = net_dims
         args.gamma = gamma
-        # horizon_len: on-policy uses full episode, off-policy uses 1/4 for batching
-        args.horizon_len = max_step if not is_off_policy else max_step // 4
+        # horizon_len: on-policy uses full training episode, off-policy uses 1/4 for batching
+        args.horizon_len = train_max_step if not is_off_policy else train_max_step // 4
         args.repeat_times = repeat_times
         args.learning_rate = learning_rate
         args.state_value_tau = state_value_tau
@@ -1095,7 +1096,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
             # Explicit defaults matching HPO script (agent getattr fallbacks are the same,
             # but being explicit prevents silent drift if agent defaults ever change)
             if batch_size is not None:
-                args.batch_size = batch_size  # H200: 2048 to saturate tensor cores
+                args.batch_size = batch_size  # H200: 4096 to saturate tensor cores
             args.lambda_entropy = lambda_entropy
             args.ratio_clip = 0.25           # PPO clip range: ratio.clamp(1-clip, 1+clip)
             args.lambda_gae_adv = 0.95       # GAE lambda for advantage estimation
@@ -1111,7 +1112,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         args.eval_env_args = {
             'env_name': 'AlpacaStockVecEnv-v1',
             'num_envs': num_envs,
-            'max_step': max_step,
+            'max_step': val_max_step,
             'state_dim': state_dim,
             'action_dim': action_dim,
             'if_discrete': False,
