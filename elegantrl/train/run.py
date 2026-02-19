@@ -136,6 +136,9 @@ def train_agent_single_process(args: Config):
         logging_tuple = (*logging_tuple, agent.explore_rate, show_str)
         th.set_grad_enabled(False)
 
+        # Periodic save of full agent state (act, cri, optimizers) for crash recovery
+        agent.save_or_load_agent(cwd, if_save=True)
+
         # Sync VecNormalize stats from training env to eval env before evaluation
         if hasattr(env, 'save'):
             env.save(f"{cwd}/vec_normalize.pt")
@@ -348,6 +351,9 @@ class Learner(Process):
             th.set_grad_enabled(True)
             logging_tuple = agent.update_net(buffer)
             th.set_grad_enabled(False)
+
+            # Periodic save of full agent state (act, cri, optimizers) for crash recovery
+            agent.save_or_load_agent(cwd, if_save=True)
 
             '''Learner receive training signal from Evaluator'''
             if self.eval_pipe.poll():  # whether there is any data available to be read of this pipe0
