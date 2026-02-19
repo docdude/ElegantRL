@@ -310,7 +310,11 @@ class AgentBase:
                     th.save(obj, file_path)  # full module for evaluator compatibility
             elif os.path.isfile(file_path):
                 if is_optimizer:
-                    loaded = th.load(file_path, map_location=self.device, weights_only=True)
+                    # Try state_dict format first (new), fall back to full object (old)
+                    try:
+                        loaded = th.load(file_path, map_location=self.device, weights_only=True)
+                    except Exception:
+                        loaded = th.load(file_path, map_location=self.device, weights_only=False)
                     # Handle both old format (full optimizer) and new format (state_dict)
                     if hasattr(loaded, 'state_dict'):
                         obj.load_state_dict(loaded.state_dict())
