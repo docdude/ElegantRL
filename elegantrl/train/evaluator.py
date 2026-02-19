@@ -131,6 +131,9 @@ class Evaluator:
             recorder = np.load(self.recorder_path)
             self.recorder = [tuple(i) for i in recorder]  # convert numpy to list
             self.total_step = self.recorder[-1][0]
+            self.max_r = max(r[1] for r in self.recorder)  # restore max_r from recorder
+            print(f"| Evaluator resumed: total_step={self.total_step:.0f}, max_r={self.max_r:.2f}, "
+                  f"recorder entries={len(self.recorder)}")
 
     def get_cumulative_rewards_and_step_single_env(self, actor) -> TEN:
         rewards_steps_list = [get_rewards_and_steps(self.env, actor) for _ in range(self.eval_times)]
