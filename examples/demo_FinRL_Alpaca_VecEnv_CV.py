@@ -1233,6 +1233,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         state, _ = val_env.reset()
         account_values = [1e6]  # Track actual portfolio value for proper Sharpe
         device = f'cuda:{gpu_id}' if gpu_id >= 0 else 'cpu'
+        max_step = val_end - val_start
         
         for t in range(max_step):
             with th.no_grad():
