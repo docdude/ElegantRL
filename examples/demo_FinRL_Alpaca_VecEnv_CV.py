@@ -1042,10 +1042,23 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         print(f"FOLD {fold_num}/{n_splits}: Train [{train_start}:{train_end}] -> Val [{val_start}:{val_end}]")
         print("="*60)
         
+        # Scale num_envs inversely with horizon_len to keep GPU memory constant
+        # Reference: fold 1 budget = num_envs * reference_horizon (445 for H200)
+        # Longer folds get fewer envs so buffer (horizon_len, num_envs, ~315) stays constant
+        reference_horizon = 445  # H200 config was tuned for this
+        if not is_off_policy and h200 and train_max_step > reference_horizon:
+            fold_num_envs = max(2048, (num_envs * reference_horizon) // train_max_step)
+            # Round down to nearest power-of-2 for GPU efficiency
+            fold_num_envs = 2 ** int(np.log2(fold_num_envs))
+            if fold_num_envs != num_envs:
+                print(f"   ⚙️  Scaling num_envs {num_envs}→{fold_num_envs} (horizon {train_max_step} > {reference_horizon})")
+        else:
+            fold_num_envs = num_envs
+
         # Create env_args for this fold
         env_args = {
             'env_name': 'AlpacaStockVecEnv-v1',
-            'num_envs': num_envs,
+            'num_envs': fold_num_envs,
             'max_step': train_max_step,
             'state_dim': state_dim,
             'action_dim': action_dim,
@@ -1111,7 +1124,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         args.eval_env_class = AlpacaStockVecEnv
         args.eval_env_args = {
             'env_name': 'AlpacaStockVecEnv-v1',
-            'num_envs': num_envs,
+            'num_envs': fold_num_envs,
             'max_step': val_max_step,
             'state_dim': state_dim,
             'action_dim': action_dim,
@@ -1127,7 +1140,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
             print(f"\n   Training Fold {fold_num}...")
             print(f"   Agent: {agent_class.__name__}")
             print(f"   Type: {'Off-policy' if is_off_policy else 'On-policy'}")
-            print(f"   num_envs: {num_envs}")
+            print(f"   num_envs: {fold_num_envs}")
             print(f"   horizon_len: {args.horizon_len}")
             print(f"   break_step: {break_step:,}")
             if is_off_policy:
@@ -1233,7 +1246,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         state, _ = val_env.reset()
         account_values = [1e6]  # Track actual portfolio value for proper Sharpe
         device = f'cuda:{gpu_id}' if gpu_id >= 0 else 'cpu'
-        max_step = val_end - val_start
+        max_step = val_env.max_step  # env's internal max_step = num_days - 1
         
         for t in range(max_step):
             with th.no_grad():
