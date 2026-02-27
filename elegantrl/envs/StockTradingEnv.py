@@ -9,9 +9,10 @@ ARY = np.ndarray
 
 class StockTradingEnv:
     def __init__(self, initial_amount=1e6, max_stock=1e2, cost_pct=1e-3, gamma=0.99,
-                 beg_idx=0, end_idx=1113, stock_cd_steps=0, min_stock_rate=0.0):
+                 beg_idx=0, end_idx=1113, stock_cd_steps=0, min_stock_rate=0.0,
+                 npz_path=None):
         self.df_pwd = './China_A_shares.pandas.dataframe'
-        self.npz_pwd = './China_A_shares.numpy.npz'
+        self.npz_pwd = npz_path if npz_path is not None else './China_A_shares.numpy.npz'
 
         self.close_ary, self.tech_ary = self.load_data_from_disk()
         self.close_ary = self.close_ary[beg_idx:end_idx]
@@ -186,9 +187,9 @@ def _inplace_amount_shares_when_sell(amount, shares, stock_action, close, cost_r
 class StockTradingVecEnv:
     def __init__(self, initial_amount=1e6, max_stock=1e2, cost_pct=1e-3, gamma=0.99,
                  beg_idx=0, end_idx=1113, num_envs=4, gpu_id=0,
-                 stock_cd_steps=0, min_stock_rate=0.0):
+                 stock_cd_steps=0, min_stock_rate=0.0, npz_path=None):
         self.df_pwd = './elegantrl/envs/China_A_shares.pandas.dataframe'
-        self.npz_pwd = './elegantrl/envs/China_A_shares.numpy.npz'
+        self.npz_pwd = npz_path if npz_path is not None else './elegantrl/envs/China_A_shares.numpy.npz'
         self.device = th.device(f"cuda:{gpu_id}" if (th.cuda.is_available() and (gpu_id >= 0)) else "cpu")
 
         '''load data'''

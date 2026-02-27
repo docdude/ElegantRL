@@ -502,42 +502,29 @@ def df_to_arrays(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
     print(f"   tech_ary: {tech_ary.shape} (days × features)")
     print(f"   Features: {len(available_techs)} per-stock + {len(market_indicators)} market-wide")
     
+    # Build date and ticker arrays for downstream tools (eval, DJIA baseline, etc.)
+    dates_ary = np.array([str(d)[:10] for d in dates])     # shape [num_days]
+    tickers_ary = np.array(tickers)                         # shape [num_stocks]
+    
     # Save to npz for the VecEnv to load
     npz_path = f"{DATA_CACHE_DIR}/alpaca_stock_data.numpy.npz"
-    np.savez_compressed(npz_path, close_ary=close_ary, tech_ary=tech_ary)
-    print(f"   ✓ Saved arrays to {npz_path}")
+    np.savez_compressed(npz_path, close_ary=close_ary, tech_ary=tech_ary,
+                        dates_ary=dates_ary, tickers_ary=tickers_ary)
+    print(f"   ✓ Saved arrays to {npz_path} (incl. dates & tickers)")
     
     return close_ary, tech_ary
 
 
 # =============================================================================
-# ADAPTED VECENV FOR ALPACA DATA (Module-level for pickling)
+# ALPACA VECENV — just StockTradingVecEnv with npz_path pre-filled
 # =============================================================================
 
-# Path where the npz data is stored (set before creating env)
+# Path where the npz data is stored
 ALPACA_NPZ_PATH = f"{DATA_CACHE_DIR}/alpaca_stock_data.numpy.npz"
 
-
-class AlpacaStockVecEnv(StockTradingVecEnv):
-    """
-    StockTradingVecEnv adapted for Alpaca/FinRL data.
-    
-    This class overrides load_data_from_disk() to load from our pre-processed
-    npz file instead of the default China_A_shares files.
-    
-    Note: Must be defined at module level for multiprocessing pickle support.
-    """
-    
-    def load_data_from_disk(self, tech_id_list=None):
-        """Load pre-processed Alpaca data from npz file."""
-        if os.path.exists(ALPACA_NPZ_PATH):
-            ary_dict = np.load(ALPACA_NPZ_PATH, allow_pickle=True)
-            return ary_dict['close_ary'], ary_dict['tech_ary']
-        else:
-            raise FileNotFoundError(
-                f"Alpaca data not found at {ALPACA_NPZ_PATH}. "
-                f"Run download_and_preprocess() first."
-            )
+# No subclass needed — npz_path is now a first-class constructor kwarg.
+# Keep the name as a convenience alias for backward compat with scripts.
+AlpacaStockVecEnv = StockTradingVecEnv
 
 
 def find_best_checkpoint(directory: str) -> str:
@@ -727,6 +714,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         'gamma': gamma,
         'beg_idx': 0,
         'end_idx': train_end_idx,
+        'npz_path': ALPACA_NPZ_PATH,
         # VecNormalize: running observation/reward normalization
         'use_vec_normalize': use_vec_normalize,
         'vec_normalize_kwargs': vec_normalize_kwargs,
@@ -795,6 +783,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         'if_discrete': False,
         'beg_idx': train_end_idx,
         'end_idx': num_days,
+        'npz_path': ALPACA_NPZ_PATH,
         # VecNormalize for eval env - uses same settings but will load train stats
         'use_vec_normalize': use_vec_normalize,
         'vec_normalize_kwargs': {**vec_normalize_kwargs, 'training': False},  # Don't update stats during eval
@@ -928,6 +917,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     print(f"| NOTE: Evaluating on HELD-OUT test data only (not seen during training)")
     
     val_env = AlpacaStockVecEnv(
+        npz_path=ALPACA_NPZ_PATH,
         initial_amount=1e6,
         max_stock=100,
         cost_pct=1e-3,

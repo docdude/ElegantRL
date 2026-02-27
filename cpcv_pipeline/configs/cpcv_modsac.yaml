@@ -1,0 +1,78 @@
+# ModSAC Configuration for CPCV Pipeline HPO
+# Usage:
+#   Single run:  python cpcv_pipeline/hpo_cpcv.py --config-name=cpcv_modsac
+#   HPO sweep:   python cpcv_pipeline/hpo_cpcv.py -m --config-name=cpcv_modsac
+# ModSAC: Modified SAC with reliable_lambda and Two Time-scale Update Rule
+
+defaults:
+  - _self_
+  - search_space: modsac_space
+  - override hydra/sweeper: HyperSMAC
+
+agent: modsac
+gpu_id: 0
+
+# Cross-validation — CPCV by default
+cv_method: cpcv
+n_groups: 5
+n_test_groups: 2
+embargo_days: 7
+gap_days: 7
+test_ratio: 0.2
+
+# Adaptive CPCV defaults (only used when cv_method=acpcv)
+acpcv_feature: drawdown
+acpcv_window: 63
+n_subsplits: 3
+lower_quantile: 0.25
+upper_quantile: 0.75
+
+# Bagged CPCV defaults (only used when cv_method=bcpcv)
+n_bags: 5
+base_seed: 1943
+
+seed: 42
+break_step: 500000
+
+state_dim: 283
+action_dim: 28
+num_envs: 96
+
+learning_rate: 1e-4
+gamma: 0.99
+net_arch: "medium"
+batch_size: 256
+buffer_size: 100000
+soft_update_tau: 0.005
+horizon_len: 256
+repeat_times: 2
+clip_grad_norm: 3.0
+
+# ModSAC specific
+num_ensembles: 8
+critic_tau: 0.995
+
+use_vec_normalize: false
+norm_obs: true
+norm_reward: false
+
+cleanup_checkpoints: true
+
+hydra:
+  sweeper:
+    search_space: ${search_space}
+    n_trials: 50
+    resume: true
+    sweeper_kwargs:
+      seeds: [0, 1, 2]
+      max_parallelization: 1
+      maximize: true
+      optimizer_kwargs:
+        smac_facade:
+          _target_: smac.facade.hyperparameter_optimization_facade.HyperparameterOptimizationFacade
+          _partial_: true
+        scenario:
+          n_trials: ${hydra.sweeper.n_trials}
+          deterministic: false
+          n_workers: 1
+          output_directory: ${hydra.sweep.dir}

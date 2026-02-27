@@ -37,5 +37,12 @@ datasets/
 
 # Scratch / temp
 full_diff.patch
-notebooks/
+/notebooks/
 .env
+
+# Train results and logs (CPCV pipeline outputs)
+train_results/
+*.log
+
+# PDF papers (too large)
+*.pdf

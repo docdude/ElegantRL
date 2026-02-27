@@ -286,6 +286,7 @@ def draw_learning_curve(recorder: np.ndarray = None,
     lines0, labels0 = ax00.get_legend_handles_labels()
     lines1, labels1 = ax01.get_legend_handles_labels()
     ax00.legend(lines0 + lines1, labels0 + labels1, loc='upper left')
+    ax00.set_xlim(left=0)
     ax00.grid(alpha=0.3)
     ax00.set_title('Rewards')
 
@@ -317,6 +318,7 @@ def draw_learning_curve(recorder: np.ndarray = None,
     lines10, labels10 = ax10.get_legend_handles_labels()
     lines11, labels11 = ax11.get_legend_handles_labels()
     ax10.legend(lines10 + lines11, labels10 + labels11, loc='upper right')
+    ax10.set_xlim(left=0)
     ax10.grid(alpha=0.3)
     ax10.set_title('Training Objectives')
 

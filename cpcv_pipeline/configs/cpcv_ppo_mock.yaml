@@ -1,0 +1,94 @@
+# Mock PPO config for testing HPO pipeline wiring
+# Uses minimal compute: tiny break_step, holdout CV, small network
+#
+# Single run (test config resolution):
+#   python cpcv_pipeline/hpo_cpcv.py --config-name=cpcv_ppo_mock
+#
+# HPO sweep (test Hypersweeper wiring):
+#   python cpcv_pipeline/hpo_cpcv.py -m --config-name=cpcv_ppo_mock
+#
+# CPCV mode (test all 10 splits with tiny training):
+#   python cpcv_pipeline/hpo_cpcv.py --config-name=cpcv_ppo_mock cv_method=cpcv
+
+defaults:
+  - _self_
+  - search_space: ppo_space
+  - override hydra/sweeper: HyperSMAC
+
+# Agent
+agent: ppo
+gpu_id: -1  # CPU-only for mock test (GPU occupied by obs-only training)
+
+# CV — holdout for speed (switch to cpcv to test splits)
+cv_method: holdout
+n_folds: 1
+n_groups: 5
+n_test_groups: 2
+embargo_days: 7
+gap_days: 0
+test_ratio: 0.2
+
+# Adaptive CPCV defaults
+acpcv_feature: drawdown
+acpcv_window: 63
+n_subsplits: 3
+lower_quantile: 0.25
+upper_quantile: 0.75
+
+# Bagged CPCV defaults
+n_bags: 3
+base_seed: 1943
+
+# Tiny training for mock test
+seed: 42
+break_step: 5000  # ~30 seconds of training
+
+# Environment (fixed)
+state_dim: 283
+action_dim: 28
+num_envs: 4   # Tiny for mock test (GPU OOM-safe)
+
+# Hyperparameters
+learning_rate: 1e-4
+gamma: 0.99
+net_arch: "small"     # [64, 64]
+batch_size: 128
+repeat_times: 4
+
+# PPO-specific
+ratio_clip: 0.25
+lambda_gae_adv: 0.95
+lambda_entropy: 0.01
+clip_grad_norm: 3.0
+if_use_v_trace: false
+
+# VecNormalize
+use_vec_normalize: false
+norm_obs: true
+norm_reward: false
+
+cleanup_checkpoints: true
+
+# Hydra — 2 trials only for mock sweep
+hydra:
+  sweeper:
+    search_space: ${search_space}
+    n_trials: 2
+    resume: false
+    sweeper_kwargs:
+      seeds: [0]
+      max_parallelization: 1
+      maximize: true
+      optimizer_kwargs:
+        smac_facade:
+          _target_: smac.facade.hyperparameter_optimization_facade.HyperparameterOptimizationFacade
+          _partial_: true
+        scenario:
+          n_trials: ${hydra.sweeper.n_trials}
+          deterministic: false
+          n_workers: 1
+          output_directory: ${hydra.sweep.dir}
+  run:
+    dir: outputs/${agent}_mock/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/${agent}_mock_sweep/${now:%Y-%m-%d_%H-%M-%S}

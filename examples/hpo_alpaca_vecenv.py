@@ -311,22 +311,12 @@ def get_cv_splits(
 
 
 # =============================================================================
-# VECENV FOR ALPACA DATA
+# ALPACA VECENV — just StockTradingVecEnv with npz_path pre-filled
 # =============================================================================
 
-class AlpacaStockVecEnv(StockTradingVecEnv):
-    """StockTradingVecEnv adapted for Alpaca/FinRL data."""
-    
-    def load_data_from_disk(self, tech_id_list=None):
-        """Load pre-processed Alpaca data from npz file."""
-        if os.path.exists(ALPACA_NPZ_PATH):
-            ary_dict = np.load(ALPACA_NPZ_PATH, allow_pickle=True)
-            return ary_dict['close_ary'], ary_dict['tech_ary']
-        else:
-            raise FileNotFoundError(
-                f"Alpaca data not found at {ALPACA_NPZ_PATH}. "
-                f"Run demo_FinRL_Alpaca_VecEnv.py first to download data."
-            )
+# No subclass needed — npz_path is now a first-class constructor kwarg.
+# Keep the name as a convenience alias for backward compat.
+AlpacaStockVecEnv = StockTradingVecEnv
 
 
 # =============================================================================
@@ -673,6 +663,7 @@ def train_and_evaluate(cfg: DictConfig) -> float:
             'gamma': gamma,
             'beg_idx': train_start,
             'end_idx': train_end,
+            'npz_path': ALPACA_NPZ_PATH,
             'use_vec_normalize': use_vec_normalize,
             'vec_normalize_kwargs': vec_normalize_kwargs,
         }
@@ -725,6 +716,7 @@ def train_and_evaluate(cfg: DictConfig) -> float:
             'if_discrete': False,
             'beg_idx': val_start,
             'end_idx': val_end,
+            'npz_path': ALPACA_NPZ_PATH,
             'use_vec_normalize': use_vec_normalize,
             'vec_normalize_kwargs': {**vec_normalize_kwargs, 'training': False},
         }
@@ -748,6 +740,7 @@ def train_and_evaluate(cfg: DictConfig) -> float:
         actor.eval()
         
         val_env_args = {
+            'npz_path': ALPACA_NPZ_PATH,
             'initial_amount': 1e6, 'max_stock': 100, 'cost_pct': 1e-3,
             'gamma': gamma, 'beg_idx': val_start, 'end_idx': val_end,
             'num_envs': num_envs, 'gpu_id': gpu_id,

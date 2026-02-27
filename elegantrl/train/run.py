@@ -326,7 +326,7 @@ class Learner(Process):
 
             '''COMMUNICATE between Learners: Learner send actor to other Learners'''
             _buffer_len = num_envs * num_workers
-            _buffer_items_tensor = [t[:, :_buffer_len].cpu().detach_() for t in buffer_items_tensor]
+            _buffer_items_tensor = [t[:, :_buffer_len].cpu().detach() for t in buffer_items_tensor]
             for shift_id in range(num_communications):
                 _learner_pipe = self.learners_pipe[learner_id][0]
                 _learner_pipe.send(_buffer_items_tensor)
@@ -351,6 +351,9 @@ class Learner(Process):
             th.set_grad_enabled(True)
             logging_tuple = agent.update_net(buffer)
             th.set_grad_enabled(False)
+            # Match single-process format: append explore_rate + show_str so Evaluator
+            # prints/records columns consistently (objC, objA, ... , explore_rate)
+            logging_tuple = (*logging_tuple, agent.explore_rate, '')
 
             # Periodic save of full agent state (act, cri, optimizers) for crash recovery
             agent.save_or_load_agent(cwd, if_save=True)

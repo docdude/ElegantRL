@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from examples.demo_FinRL_Alpaca_VecEnv_CV import (
     AlpacaStockVecEnv, download_and_preprocess, df_to_arrays,
-    TEST_START, TEST_END
+    TEST_START, TEST_END, ALPACA_NPZ_PATH
 )
 
 def evaluate_checkpoint(actor_path, val_env, num_days, initial_amount=1e6, gpu_id=0):
@@ -113,6 +113,7 @@ def main(checkpoint_dir, gpu_id=0, beg_idx=None, end_idx=None):
     
     # Create validation env
     val_env = AlpacaStockVecEnv(
+        npz_path=ALPACA_NPZ_PATH,
         initial_amount=1e6,
         max_stock=100,
         cost_pct=1e-3,

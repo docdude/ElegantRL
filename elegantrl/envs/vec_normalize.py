@@ -270,13 +270,25 @@ class VecNormalize:
         th.save(state, path)
     
     def load(self, path: Union[str, Path], verbose: bool = False) -> None:
-        """Load normalization statistics."""
+        """Load normalization statistics and configuration flags."""
         path = Path(path)
         state = th.load(path, map_location=self.device, weights_only=False)
         self.obs_rms.load_state_dict(state['obs_rms'])
         self.ret_rms.load_state_dict(state['ret_rms'])
+        # Restore normalization flags so eval matches training config
+        if 'norm_obs' in state:
+            self.norm_obs = state['norm_obs']
+        if 'norm_reward' in state:
+            self.norm_reward = state['norm_reward']
+        if 'clip_obs' in state:
+            self.clip_obs = state['clip_obs']
+        if 'clip_reward' in state:
+            self.clip_reward = state['clip_reward']
+        if 'gamma' in state:
+            self.gamma = state['gamma']
         if verbose:
             print(f"VecNormalize stats loaded from {path}")
+            print(f"  norm_obs={self.norm_obs}, norm_reward={self.norm_reward}")
             print(f"  Obs stats: mean range [{self.obs_rms.mean.min():.3f}, {self.obs_rms.mean.max():.3f}], "
                   f"std range [{self.obs_rms.std.min():.3f}, {self.obs_rms.std.max():.3f}]")
     
