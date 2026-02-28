@@ -44,6 +44,7 @@ from cpcv_pipeline.function_train_test import (
     load_dates_from_npz,
     save_sliced_data,
     get_agent_class,
+    run_eval_episodes,
     DATA_CACHE_DIR,
 )
 from elegantrl.envs.StockTradingEnv import StockTradingVecEnv
@@ -183,8 +184,9 @@ def evaluate_single_checkpoint(
 ) -> dict | None:
     """Evaluate one checkpoint across one or more contiguous test segments.
 
-    For non-contiguous test sets (K>=2), runs the actor through each segment
-    independently, then chains daily returns for correct aggregate metrics.
+    Delegates the actual eval loop to :func:`run_eval_episodes` (single
+    implementation in function_train_test.py), then adds baseline
+    comparison metrics on top.
 
     Parameters
     ----------
@@ -202,71 +204,13 @@ def evaluate_single_checkpoint(
         print(f"    WARN: Failed to load {os.path.basename(checkpoint_path)}: {e}")
         return None
 
-    all_daily_returns = []
+    # ── Core eval (shared with evaluate_agent_on_indices) ─────────────
+    result = run_eval_episodes(actor, segment_envs, initial_amount, device)
 
-    for seg in segment_envs:
-        env = seg['env']
-        num_days = seg['num_days']
+    account_values = result['account_values']
+    final_return = result['final_return']
 
-        env.if_random_reset = False
-        state, _ = env.reset()
-
-        seg_values = [initial_amount]
-        max_step = num_days - 1
-
-        with th.no_grad():
-            for t in range(max_step):
-                action = actor(state.to(device) if hasattr(state, 'to') else state)
-                state, reward, terminal, truncate, info = env.step(action)
-
-                if hasattr(env, 'total_asset'):
-                    if t < max_step - 1:
-                        seg_values.append(env.total_asset[0].cpu().item())
-                    else:
-                        if hasattr(env, 'cumulative_returns') and env.cumulative_returns is not None:
-                            cr = env.cumulative_returns
-                            if isinstance(cr, list):
-                                final_value = initial_amount * cr[0] / 100
-                            elif hasattr(cr, 'cpu'):
-                                final_value = initial_amount * cr[0].cpu().item() / 100
-                            else:
-                                final_value = initial_amount * float(cr) / 100
-                            seg_values.append(final_value)
-                        else:
-                            seg_values.append(seg_values[-1])
-
-        seg_values = np.array(seg_values)
-        seg_returns = np.diff(seg_values) / (seg_values[:-1] + 1e-9)
-        all_daily_returns.append(seg_returns)
-
-    # Chain daily returns across segments
-    daily_returns = np.concatenate(all_daily_returns)
-
-    # Reconstruct combined account values by compounding
-    account_values = initial_amount * np.concatenate(
-        [[1.0], np.cumprod(1 + daily_returns)])
-
-    final_return = (account_values[-1] / account_values[0]) - 1.0
-
-    # Sharpe ratio (annualised)
-    sharpe = (np.mean(daily_returns) / (np.std(daily_returns) + 1e-8)) * np.sqrt(252)
-
-    # Max drawdown
-    peak = np.maximum.accumulate(account_values)
-    drawdown = (account_values - peak) / peak
-    max_drawdown = drawdown.min()
-
-    # Sortino ratio (downside deviation only)
-    neg_returns = daily_returns[daily_returns < 0]
-    downside_std = np.std(neg_returns) if len(neg_returns) > 0 else 1e-9
-    sortino = (np.mean(daily_returns) / (downside_std + 1e-9)) * np.sqrt(252)
-
-    # Calmar ratio (annualised return / max drawdown)
-    n_days = max(len(daily_returns), 1)
-    ann_return = (1 + final_return) ** (252 / n_days) - 1
-    calmar = ann_return / (abs(max_drawdown) + 1e-9)
-
-    # Baseline comparison
+    # ── Baseline comparison ───────────────────────────────────────────
     alpha = 0.0
     first_beat_day = -1
     days_beating = 0
@@ -280,8 +224,6 @@ def evaluate_single_checkpoint(
         strategy_pct = (account_values / account_values[0] - 1) * 100
         baseline_pct = (combined_baseline_values / combined_baseline_values[0] - 1) * 100
 
-        # Both curves are constructed from the same segment structure so
-        # lengths should match; handle minor mismatches gracefully.
         min_len = min(len(strategy_pct), len(baseline_pct))
         beating_mask = strategy_pct[:min_len] > baseline_pct[:min_len]
         if beating_mask.any():
@@ -293,19 +235,13 @@ def evaluate_single_checkpoint(
             days_beating = 0
             pct_beating = 0.0
 
-    return {
-        'final_return': float(final_return),
-        'sharpe': float(sharpe),
-        'sortino': float(sortino),
-        'calmar': float(calmar),
-        'max_drawdown': float(max_drawdown),
-        'ann_return': float(ann_return),
-        'alpha': float(alpha),
-        'first_beat_day': first_beat_day,
-        'days_beating': days_beating,
-        'pct_beating': float(pct_beating),
-        'account_values': account_values,
-    }
+    # Merge baseline metrics into result
+    result['alpha'] = float(alpha)
+    result['first_beat_day'] = first_beat_day
+    result['days_beating'] = days_beating
+    result['pct_beating'] = float(pct_beating)
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

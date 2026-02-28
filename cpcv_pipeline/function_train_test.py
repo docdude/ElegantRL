@@ -492,7 +492,139 @@ def train_split(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test / evaluate a trained agent on OOS data
+# Shared deterministic evaluation core
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_eval_episodes(
+    actor,
+    segment_envs: list,
+    initial_amount: float,
+    device,
+) -> dict:
+    """Run a deterministic eval episode across one or more segment envs.
+
+    This is the **single implementation** of the eval loop used by both
+    ``evaluate_agent_on_indices`` (HPO / quick eval) and
+    ``eval_all_checkpoints.evaluate_single_checkpoint`` (full checkpoint
+    sweep).  Any fix to account-value collection or terminal-step handling
+    should be made here only.
+
+    For non-contiguous test sets (K>=2 in CPCV/ACPCV) the caller builds one
+    env per contiguous segment.  Daily returns are chained across segments
+    to avoid artificial price jumps at gap boundaries.
+
+    IMPORTANT — terminal-step handling:
+    VecEnv auto-resets on the terminal step, overwriting ``total_asset``
+    back to ``initial_amount``.  On that step we read ``cumulative_returns``
+    (set *before* the auto-reset) to recover the true final portfolio value.
+
+    Parameters
+    ----------
+    actor : nn.Module
+        Loaded & eval-mode actor network.
+    segment_envs : list[dict]
+        Each dict has ``'env'`` (StockTradingVecEnv or VecNormalize wrapper)
+        and ``'num_days'`` (int).
+    initial_amount : float
+        Starting portfolio value (for the first account-value entry).
+    device : torch.device | str
+        Device to move state tensors to before calling the actor.
+
+    Returns
+    -------
+    dict with keys:
+        daily_returns   np.ndarray   chained across all segments
+        account_values  np.ndarray   compounded from daily_returns
+        final_return    float        (account_values[-1]/[0]) - 1
+        sharpe          float        annualised (×√252)
+        sortino         float        annualised, downside-deviation only
+        calmar          float        annualised return / |max drawdown|
+        max_drawdown    float        worst peak-to-trough (negative)
+        ann_return      float        annualised total return
+    """
+    all_daily_returns = []
+
+    for seg in segment_envs:
+        env = seg['env']
+        num_days = seg['num_days']
+
+        env.if_random_reset = False
+        state, _ = env.reset()
+
+        seg_values = [initial_amount]
+        max_step = num_days - 1
+
+        with th.no_grad():
+            for t in range(max_step):
+                action = actor(state.to(device) if hasattr(state, 'to') else state)
+                state, reward, terminal, truncate, info = env.step(action)
+
+                if t < max_step - 1:
+                    if hasattr(env, 'total_asset'):
+                        seg_values.append(env.total_asset[0].cpu().item())
+                else:
+                    # Terminal step — total_asset was overwritten by auto-reset.
+                    cr = getattr(env, 'cumulative_returns', None)
+                    if cr is not None:
+                        if isinstance(cr, list):
+                            final_value = initial_amount * cr[0] / 100
+                        elif hasattr(cr, 'cpu'):
+                            final_value = initial_amount * cr[0].cpu().item() / 100
+                        else:
+                            final_value = initial_amount * float(cr) / 100
+                        seg_values.append(final_value)
+                    elif hasattr(env, 'total_asset'):
+                        seg_values.append(env.total_asset[0].cpu().item())
+                    else:
+                        seg_values.append(seg_values[-1])
+
+        seg_values = np.array(seg_values)
+        seg_returns = np.diff(seg_values) / (seg_values[:-1] + 1e-9)
+        all_daily_returns.append(seg_returns)
+
+    # Chain daily returns across segments
+    daily_returns = np.concatenate(all_daily_returns)
+
+    # Reconstruct combined account values by compounding
+    account_values = initial_amount * np.concatenate(
+        [[1.0], np.cumprod(1 + daily_returns)])
+
+    final_return = float((account_values[-1] / account_values[0]) - 1.0)
+
+    # Sharpe ratio (annualised)
+    sharpe = float(
+        (np.mean(daily_returns) / (np.std(daily_returns) + 1e-8)) * np.sqrt(252))
+
+    # Max drawdown
+    peak = np.maximum.accumulate(account_values)
+    drawdown = (account_values - peak) / peak
+    max_drawdown = float(drawdown.min())
+
+    # Sortino ratio (downside deviation only)
+    neg_returns = daily_returns[daily_returns < 0]
+    downside_std = np.std(neg_returns) if len(neg_returns) > 0 else 1e-9
+    sortino = float(
+        (np.mean(daily_returns) / (downside_std + 1e-9)) * np.sqrt(252))
+
+    # Calmar ratio (annualised return / max drawdown)
+    n_days = max(len(daily_returns), 1)
+    ann_return = float((1 + final_return) ** (252 / n_days) - 1)
+    calmar = float(ann_return / (abs(max_drawdown) + 1e-9))
+
+    return {
+        'daily_returns': daily_returns,
+        'account_values': account_values,
+        'final_return': final_return,
+        'sharpe': sharpe,
+        'sortino': sortino,
+        'calmar': calmar,
+        'max_drawdown': max_drawdown,
+        'ann_return': ann_return,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# High-level eval: indices → metrics  (used by HPO and scripts)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate_agent_on_indices(
@@ -507,35 +639,13 @@ def evaluate_agent_on_indices(
     num_envs: int = 1,
 ) -> dict:
     """
-    Evaluate a trained agent on a specific set of indices using VecEnv.
+    Evaluate a trained agent on a specific set of indices.
 
-    Uses the same VecEnv class as training (not single-env) so that
-    observation shapes and VecNormalize stats are consistent.
+    Builds per-segment envs for non-contiguous index sets, then delegates
+    to :func:`run_eval_episodes` for the actual eval loop.
 
-    Parameters
-    ----------
-    checkpoint_path : str
-        Path to actor .pt / .pth file.
-    indices : np.ndarray
-        Row indices to evaluate on.
-    close_ary, tech_ary : np.ndarray
-        Full arrays.
-    model_name : str
-        Agent class name.
-    net_dims : list
-        Network dimensions.
-    gpu_id : int
-        GPU device.
-    vec_normalize_path : str or None
-        Path to vec_normalize.pt saved during training.
-        If provided, wraps the eval env with VecNormalize in eval mode.
-    num_envs : int
-        Number of parallel environments for evaluation.
-
-    Returns
-    -------
-    result : dict
-        final_return, sharpe, max_drawdown, daily_returns, account_values
+    Returns dict with: final_return, sharpe, sortino, calmar, max_drawdown,
+    ann_return, account_values, daily_returns.
     """
     from elegantrl.envs.vec_normalize import VecNormalize
 
@@ -543,45 +653,26 @@ def evaluate_agent_on_indices(
         net_dims = [128, 64]
 
     indices = np.sort(indices)
-    n_rows = len(indices)
-
-    # Save sliced test data
-    test_npz = os.path.join(DATA_CACHE_DIR, "cpcv_splits", "_eval_temp.npz")
-    save_sliced_data(indices, test_npz, close_ary, tech_ary)
-
-    state_dim = close_ary.shape[1] * 2 + tech_ary.shape[1] + 1
-    action_dim = close_ary.shape[1]
+    initial_amount = DEFAULT_ENV_PARAMS.get('initial_amount', 1e6)
     gamma = DEFAULT_ERL_PARAMS.get('gamma', 0.995)
-
-    env = StockTradingVecEnv(
-        npz_path=test_npz,
-        initial_amount=DEFAULT_ENV_PARAMS.get('initial_amount', 1e6),
-        max_stock=DEFAULT_ENV_PARAMS.get('max_stock', 1e2),
-        cost_pct=DEFAULT_ENV_PARAMS.get('cost_pct', 1e-3),
-        gamma=gamma,
-        beg_idx=0,
-        end_idx=n_rows,
-        num_envs=num_envs,
-        gpu_id=gpu_id,
-    )
-    env.if_random_reset = False
-
-    # Wrap with VecNormalize if stats file exists (eval mode = frozen stats)
-    if vec_normalize_path and os.path.exists(vec_normalize_path):
-        env = VecNormalize(env, training=False)
-        env.load(vec_normalize_path, verbose=True)
-        print(f"    Loaded VecNormalize stats from {vec_normalize_path}")
-
-    # Load actor
-    agent_class = get_agent_class(model_name)
     device = th.device(f"cuda:{gpu_id}" if gpu_id >= 0 else "cpu")
 
+    # ── Split into contiguous segments ───────────────────────────────
+    segments = _split_contiguous(indices)
+
+    if len(segments) > 1:
+        print(f"    Non-contiguous test set: {len(segments)} segments, "
+              f"sizes={[len(s) for s in segments]}")
+
+    # ── Load actor ───────────────────────────────────────────────────
+    state_dim = close_ary.shape[1] * 2 + tech_ary.shape[1] + 1
+    action_dim = close_ary.shape[1]
+    agent_class = get_agent_class(model_name)
+
     try:
-        # Try loading full actor object first
         actor = th.load(checkpoint_path, map_location=device, weights_only=False)
         actor.eval()
     except Exception:
-        # Fall back to state_dict
         agent = agent_class(net_dims, state_dim, action_dim, gpu_id=gpu_id)
         agent.act.load_state_dict(
             th.load(checkpoint_path, map_location=device, weights_only=False)
@@ -589,36 +680,63 @@ def evaluate_agent_on_indices(
         actor = agent.act
         actor.eval()
 
-    # Run episode — VecEnv returns tensors, use env_id=0 for metrics
-    state, _ = env.reset()
-    max_step = env.max_step
-    account_values = [DEFAULT_ENV_PARAMS.get('initial_amount', 1e6)]
+    # ── Build per-segment envs ───────────────────────────────────────
+    segment_envs = []
+    temp_npz_paths = []
 
-    for t in range(max_step):
-        with th.no_grad():
-            action = actor(state.to(device) if hasattr(state, 'to') else state)
-        state, reward, terminal, truncate, info = env.step(action)
+    for seg_idx, seg_indices in enumerate(segments):
+        n_seg = len(seg_indices)
+        seg_npz = os.path.join(DATA_CACHE_DIR, "cpcv_splits",
+                               f"_eval_temp_seg{seg_idx}.npz")
+        save_sliced_data(seg_indices, seg_npz, close_ary, tech_ary)
+        temp_npz_paths.append(seg_npz)
 
-        if hasattr(env, 'total_asset'):
-            account_values.append(env.total_asset[0].cpu().item())
+        env = StockTradingVecEnv(
+            npz_path=seg_npz,
+            initial_amount=initial_amount,
+            max_stock=DEFAULT_ENV_PARAMS.get('max_stock', 1e2),
+            cost_pct=DEFAULT_ENV_PARAMS.get('cost_pct', 1e-3),
+            gamma=gamma,
+            beg_idx=0, end_idx=n_seg,
+            num_envs=num_envs, gpu_id=gpu_id,
+        )
+        env.if_random_reset = False
 
-    account_values = np.array(account_values)
-    daily_returns = np.diff(account_values) / (account_values[:-1] + 1e-9)
+        if vec_normalize_path and os.path.exists(vec_normalize_path):
+            env = VecNormalize(env, training=False, norm_reward=False)
+            env.load(vec_normalize_path, verbose=(seg_idx == 0))
+            env.training = False
+            env.norm_reward = False
 
-    final_return = (account_values[-1] / account_values[0]) - 1.0
-    sharpe = (np.mean(daily_returns) / (np.std(daily_returns) + 1e-9)) * np.sqrt(252)
-    max_drawdown = np.min(
-        account_values / np.maximum.accumulate(account_values)
-    ) - 1.0
+        segment_envs.append({'env': env, 'num_days': n_seg})
 
-    # Clean up temp file
-    if os.path.exists(test_npz):
-        os.remove(test_npz)
+    # ── Run eval (shared core) ───────────────────────────────────────
+    result = run_eval_episodes(actor, segment_envs, initial_amount, device)
 
-    return {
-        'final_return': float(final_return),
-        'sharpe': float(sharpe),
-        'max_drawdown': float(max_drawdown),
-        'account_values': account_values.tolist(),
-        'daily_returns': daily_returns.tolist(),
-    }
+    # Convert for backward compat
+    result['account_values'] = result['account_values'].tolist()
+    result['daily_returns'] = result['daily_returns'].tolist()
+
+    # Clean up temp files
+    for p in temp_npz_paths:
+        if os.path.exists(p):
+            os.remove(p)
+
+    return result
+
+
+def _split_contiguous(indices: np.ndarray) -> list:
+    """Split sorted index array into contiguous segments."""
+    if len(indices) == 0:
+        return []
+    indices = np.sort(indices)
+    breaks = np.where(np.diff(indices) > 1)[0]
+    if len(breaks) == 0:
+        return [indices]
+    segments = []
+    start = 0
+    for b in breaks:
+        segments.append(indices[start:b + 1])
+        start = b + 1
+    segments.append(indices[start:])
+    return segments
