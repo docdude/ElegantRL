@@ -183,6 +183,7 @@ def train_split(
     vec_normalize_kwargs: dict = None,
     continue_train: bool = False,
     cwd_suffix: str = None,
+    num_workers: int = None,
 ) -> dict:
     """
     Train a DRL agent on one CPCV split and evaluate on the test set.
@@ -305,15 +306,22 @@ def train_split(
     #   Evaluator context: ~164 MiB
     _cpu_count = os.cpu_count() or 8
     _num_workers = min(_cpu_count // 4, 4) if not is_off_policy else min(_cpu_count // 2, 6)
+    if num_workers is not None:
+        _num_workers = num_workers
     if not is_off_policy:
         try:
-            _, gpu_total = th.cuda.mem_get_info(gpu_id)
+            gpu_free, gpu_total = th.cuda.mem_get_info(gpu_id)
         except Exception:
+            gpu_free = 7 * 1024**3
             gpu_total = 8 * 1024**3
-        # Use total GPU memory minus a small reserve for OS/display/other processes.
-        # Don't use free_mem — it's unreliable if anything else is running at probe time.
-        # 1 GiB reserve covers display server, gunicorn, PyTorch fragmentation headroom.
-        usable = gpu_total - 1 * 1024**3
+        # Use actual free memory (accounts for other processes like Docker
+        # containers, display servers, etc.) with a reserve for PyTorch
+        # fragmentation and allocator overhead.
+        # Previously used (total - 1 GiB) which caused OOM when external
+        # processes (e.g. gunicorn ~848 MiB) exceeded the 1 GiB reserve.
+        _reserve = 512 * 1024**2  # 512 MiB for fragmentation/allocator headroom
+        usable = max(gpu_free - _reserve, gpu_total - 2 * 1024**3)
+        gpu_used = gpu_total - gpu_free
         # Fixed overhead: CUDA contexts for each training process
         # Measured: workers ~445 MiB, learner ~205 MiB, evaluator ~164 MiB
         fixed_overhead = _num_workers * 445 * 1024**2 + 205 * 1024**2 + 164 * 1024**2
@@ -328,7 +336,8 @@ def train_split(
         if max_envs < num_envs:
             proj_gb = (fixed_overhead + max_envs * total_steps_per_env * bytes_per_step) / 1024**3
             print(f"  GPU scaling: num_envs {num_envs}→{max_envs} "
-                  f"(GPU={gpu_total / 1024**3:.1f} GiB, horizon={train_max_step}, "
+                  f"(GPU={gpu_total / 1024**3:.1f} GiB, free={gpu_free / 1024**3:.1f} GiB, "
+                  f"used={gpu_used / 1024**2:.0f} MiB, horizon={train_max_step}, "
                   f"workers={_num_workers}, proj={proj_gb:.1f} GiB)")
             num_envs = max_envs
 

@@ -80,6 +80,8 @@ def parse_args():
                         default=DEFAULT_ERL_PARAMS['batch_size'])
     parser.add_argument("--num-envs", type=int,
                         default=DEFAULT_ENV_PARAMS['num_envs'])
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="Override num_workers (default: nproc//4, max 4)")
     parser.add_argument("--split", type=int, default=None,
                         help="Run only this split index")
     parser.add_argument("--splits", type=str, default=None,
@@ -286,6 +288,7 @@ def main():
                 vec_normalize_kwargs=vec_normalize_kwargs,
                 continue_train=args.continue_train,
                 cwd_suffix=f"bag_{bag_idx}",
+                num_workers=args.num_workers,
             )
             result['split_idx'] = split_idx
             result['bag_idx'] = bag_idx

@@ -99,6 +99,9 @@ def parse_args():
     parser.add_argument("--num-envs", type=int,
                         default=DEFAULT_ENV_PARAMS['num_envs'],
                         help="Base num_envs (auto-scaled for horizon)")
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="Override num_workers (default: nproc//4, max 4). "
+                             "Useful on low-CPU machines like L4 (8 cores → 2 workers)")
     # Execution control
     parser.add_argument("--split", type=int, default=None,
                         help="Run only this split index (0-based)")
@@ -317,6 +320,7 @@ def main():
             use_vec_normalize=use_vec_normalize,
             vec_normalize_kwargs=vec_normalize_kwargs,
             continue_train=args.continue_train,
+            num_workers=args.num_workers,
         )
         results.append(result)
 
