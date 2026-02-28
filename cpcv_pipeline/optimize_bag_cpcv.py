@@ -263,8 +263,8 @@ def main():
                             continue
 
             print(f"\n{'#'*60}")
-            print(f"# SPLIT {split_idx + 1}/{n_splits}  "
-                  f"BAG {bag_idx + 1}/{args.n_bags}  "
+            print(f"# SPLIT {split_idx}/{n_splits}  "
+                  f"BAG {bag_idx}/{args.n_bags}  "
                   f"(seed {bag_seed})")
             print(f"{'#'*60}")
 

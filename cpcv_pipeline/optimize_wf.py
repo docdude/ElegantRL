@@ -147,7 +147,7 @@ def main():
     for i, (train_idx, test_idx) in enumerate(splits):
         marker = " <- selected" if args.split == i else ""
         print(
-            f"  Fold {i + 1}: "
+            f"  Fold {i}: "
             f"Train [0:{train_idx[-1]+1}] ({len(train_idx)}d)  "
             f"|  Test [{test_idx[0]}:{test_idx[-1]+1}] "
             f"({len(test_idx)}d){marker}")
@@ -227,7 +227,7 @@ def main():
                     if max_step >= erl_params['break_step']:
                         best_i = int(np.argmax(rec[:, 1]))
                         print(
-                            f"\n  [SKIP] Fold {split_idx+1}: "
+                            f"\n  [SKIP] Fold {split_idx}: "
                             f"done ({max_step:,} steps, "
                             f"avgR={rec[best_i,1]:.3f})")
                         results.append({
@@ -246,12 +246,12 @@ def main():
                     else:
                         print(
                             f"\n  [RESUME] Fold "
-                            f"{split_idx+1}: partial "
+                            f"{split_idx}: partial "
                             f"({max_step:,} / "
                             f"{erl_params['break_step']:,})")
 
         print(f"\n{'#'*60}")
-        print(f"# TRAINING FOLD {split_idx + 1} / {n_splits}")
+        print(f"# TRAINING FOLD {split_idx} / {n_splits}")
         print(f"{'#'*60}")
 
         result = train_split(
@@ -288,7 +288,7 @@ def main():
     for r in results:
         best_r = r.get('best_avgR', 'N/A')
         sk = ' (skipped)' if r.get('skipped') else ''
-        print(f"  Fold {r['split_idx']+1}: "
+        print(f"  Fold {r['split_idx']}: "
               f"train={r['train_days']}d, "
               f"test={r['test_days']}d, "
               f"best_avgR={best_r}{sk}")

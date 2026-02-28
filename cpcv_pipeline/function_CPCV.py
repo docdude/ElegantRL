@@ -179,7 +179,7 @@ class CombPurgedKFoldCV:
         for split_idx, (train_idx, test_idx) in enumerate(self.split(total_samples)):
             test_ranges = _indices_to_ranges(test_idx)
             train_ranges = _indices_to_ranges(train_idx)
-            lines.append(f"\n  Split {split_idx + 1}:")
+            lines.append(f"\n  Split {split_idx}:")
             lines.append(f"    Test groups: {_identify_groups(test_idx, fold_bounds)}")
             lines.append(f"    Test ranges:  {test_ranges}  ({len(test_idx)} days)")
             lines.append(f"    Train ranges: {train_ranges}  ({len(train_idx)} days)")

@@ -65,14 +65,14 @@ def test_no_leakage(total_days: int, verbose: bool = False) -> bool:
 
         if len(overlap) > 0:
             n_fails += 1
-            print(f"  Split {split_idx + 1}: {status} — "
+            print(f"  Split {split_idx}: {status} — "
                   f"{len(overlap)} overlapping indices: {overlap[:10]}...")
         else:
             n_passes += 1
             if verbose:
                 train_ranges = _indices_to_ranges(train_idx)
                 test_ranges = _indices_to_ranges(test_idx)
-                print(f"  Split {split_idx + 1}: {status} — "
+                print(f"  Split {split_idx}: {status} — "
                       f"Train: {len(train_idx)}d, Test: {len(test_idx)}d")
                 print(f"    Train ranges: {train_ranges}")
                 print(f"    Test ranges:  {test_ranges}")
@@ -134,7 +134,7 @@ def test_purge_embargo_gaps(total_days: int, verbose: bool = False) -> bool:
         if verbose:
             test_ranges = _indices_to_ranges(test_idx)
             gap_ranges = _indices_to_ranges(gap_idx) if len(gap_idx) > 0 else []
-            print(f"  Split {split_idx + 1}: "
+            print(f"  Split {split_idx}: "
                   f"train={len(train_idx)}, test={len(test_idx)}, "
                   f"gap={len(gap_idx)}")
             print(f"    Test ranges: {test_ranges}")
@@ -337,7 +337,7 @@ def test_compare_old_vs_new(total_days: int, verbose: bool = False) -> bool:
 
         status = "✓ OK" if len(leaked) == 0 else f"⚠ LEAK"
 
-        print(f"  {split_idx + 1:>5} | {str(test_group_ids):>10} | "
+        print(f"  {split_idx:>5} | {str(test_group_ids):>10} | "
               f"[{old_flat_start}:{old_flat_end}] ({old_train_days}d) | "
               f"{new_train_days:>8}d    | "
               f"{len(leaked):>6}d  | {status:>8}")

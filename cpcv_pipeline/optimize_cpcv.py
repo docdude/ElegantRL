@@ -245,7 +245,7 @@ def main():
     all_splits = list(cv.split(total_days))
     for i, (train_idx, test_idx) in enumerate(all_splits):
         marker = " ← selected" if args.split == i else ""
-        print(f"  Split {i + 1:>2}: "
+        print(f"  Split {i:>2}: "
               f"Train {len(train_idx):>4}d {format_segments(train_idx)}  |  "
               f"Test {len(test_idx):>4}d {format_segments(test_idx)}{marker}")
 
@@ -281,7 +281,7 @@ def main():
                     max_step = int(rec[-1, 0])
                     if max_step >= erl_params['break_step']:
                         best_idx = int(np.argmax(rec[:, 1]))
-                        print(f"\n  [SKIP] Split {split_idx + 1}: already "
+                        print(f"\n  [SKIP] Split {split_idx}: already "
                               f"completed ({max_step:,} steps, "
                               f"best_avgR={rec[best_idx, 1]:.3f})")
                         results.append({
@@ -297,12 +297,12 @@ def main():
                         })
                         continue
                     else:
-                        print(f"\n  [RESUME] Split {split_idx + 1}: "
+                        print(f"\n  [RESUME] Split {split_idx}: "
                               f"partial run ({max_step:,} / "
                               f"{erl_params['break_step']:,} steps)")
 
         print(f"\n{'#'*60}")
-        print(f"# TRAINING SPLIT {split_idx + 1} / {n_splits}")
+        print(f"# TRAINING SPLIT {split_idx} / {n_splits}")
         print(f"{'#'*60}")
 
         result = train_split(
@@ -341,7 +341,7 @@ def main():
     print(f"{'='*60}")
     for r in results:
         best_r = r.get('best_avgR', 'N/A')
-        print(f"  Split {r['split_idx'] + 1}: "
+        print(f"  Split {r['split_idx']}: "
               f"train={r['train_days']}d, test={r['test_days']}d, "
               f"best_avgR={best_r}")
     print(f"\n  Results saved to: {cwd_base}")

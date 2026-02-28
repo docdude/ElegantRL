@@ -254,7 +254,7 @@ def train_split(
     n_test = len(test_indices)
 
     print(f"\n{'='*60}")
-    print(f"SPLIT {split_idx + 1}: Train {n_train} days, Test {n_test} days")
+    print(f"SPLIT {split_idx}: Train {n_train} days, Test {n_test} days")
     print(f"  Train indices: {format_segments(train_indices)}")
     print(f"  Test indices:  {format_segments(test_indices)}")
     overlap = np.intersect1d(train_indices, test_indices)
