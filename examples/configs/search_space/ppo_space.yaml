@@ -27,7 +27,7 @@ hyperparameters:
   # === PPO-specific ===
   batch_size:
     type: categorical
-    choices: [128, 256, 512, 1024]
+    choices: [128, 256, 512]
     default_value: ${batch_size}
   
   # NOTE: horizon_len should be <= max_step (119 for Alpaca env)
@@ -57,7 +57,7 @@ hyperparameters:
   
   repeat_times:
     type: categorical
-    choices: [4, 8, 10, 16, 20, 32]
+    choices: [4, 8, 10, 16, 20]
     default_value: ${repeat_times}
   
   # clip_grad_norm: gradient clipping (used by ElegantRL in optimizer_backward)

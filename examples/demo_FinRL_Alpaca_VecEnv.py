@@ -25,6 +25,7 @@ from elegantrl import train_agent
 from elegantrl.train.config import build_env
 from elegantrl.agents import AgentPPO, AgentA2C
 from elegantrl.agents import AgentSAC, AgentModSAC, AgentTD3, AgentDDPG
+from elegantrl.agents import AgentDiffusionModSAC
 from elegantrl.envs.StockTradingEnv import StockTradingVecEnv
 from elegantrl.envs.vec_normalize import VecNormalize
 
@@ -47,12 +48,13 @@ AGENT_REGISTRY = {
     # Off-policy agents (need reduced params for GPU memory)
     'sac': AgentSAC,
     'modsac': AgentModSAC,  # Modified SAC: negative target_entropy + reliable_lambda (better for finance)
+    'diffusionmodsac': AgentDiffusionModSAC,  # Diffusion-based variant of ModSAC (experimental)
     'td3': AgentTD3,
     'ddpg': AgentDDPG,
 }
 
 ON_POLICY_AGENTS = {'ppo', 'a2c'}
-OFF_POLICY_AGENTS = {'sac', 'modsac', 'td3', 'ddpg'}
+OFF_POLICY_AGENTS = {'sac', 'modsac', 'diffusionmodsac', 'td3', 'ddpg'}
 
 
 # =============================================================================
@@ -632,21 +634,23 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     val_max_step = num_days - train_end_idx - 1      # validation episode length
     
     # Off-policy agents need reduced parameters to avoid OOM
-    # ReplayBuffer shape: (buffer_size, num_envs, state_dim) - memory scales with BOTH!
-    # L4 (24GB): num_envs=96, buffer_size=100K = ~12GB buffer + ~10GB overhead = fits
-    # Prioritize large buffer for SAC - more important than num_envs for off-policy
+    # ReplayBuffer shape: (buffer_size, num_seqs, state_dim) where num_seqs = num_envs * num_workers
+    # For off-policy, buffer DEPTH matters most — large replay buffer = decorrelated samples,
+    # rare event retention, stable critic fitting. Fewer envs with deeper buffer is optimal.
+    # GPU memory budget (L4 24GB, ~17 GiB for buffer, ~3 GiB headroom):
+    #   8 envs × 2 workers = 16 seqs → buffer_size=1M × 16 × 285 × 4B = 17.0 GiB
     if is_off_policy:
-        num_envs = 96       # 96 envs (fits on L4 24GB with large buffer)
+        num_envs = 8        # 8 parallel trajectories (enough for exploration diversity)
         batch_size = 256
-        horizon_len = val_max_step // 4
-        buffer_size = int(1.9e5)  # 100K - buffer is (100K, 96, 283) = ~12GB
+        horizon_len = train_max_step // 4  # use TRAIN length for off-policy rollouts
+        buffer_size = int(1e6)  # 1M deep buffer — maximizes L4 memory utilization
         repeat_times = 2.0      # more gradient updates per sample (like demo_DDPG_TD3_SAC)
         learning_rate = 1e-4    # slightly lower for stability
         net_dims = [256, 128]   # slightly larger network to compensate
         state_value_tau = 0
         soft_update_tau = 5e-3  # target network update rate
         break_step = int(5e5)
-        print(f"   ⚡ Off-policy mode: num_envs={num_envs}, buffer_size={buffer_size:,} (~12GB buffer)")
+        print(f"   ⚡ Off-policy mode: num_envs={num_envs}, buffer_size={buffer_size:,} (deep buffer, ~17GB)")
     else:
         # On-policy config: --h200 maximizes H200 GPU utilization
         # Buffer shape: (horizon_len, num_envs, ~315 floats) × 4 bytes
@@ -769,10 +773,11 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     args.eval_per_step = int(5e3)  # More frequent feedback (was 2e4)
      
     # Dynamic num_workers based on CPU count and policy type
-    # Off-policy: more workers (CPU-bound gradient updates benefit from parallel rollouts)
+    # IMPORTANT: Off-policy ReplayBuffer has shape (buffer_size, num_envs * num_workers, ...)
+    # so num_workers directly multiplies GPU memory. Cap at 2 for off-policy to fit L4 24GB.
     # On-policy: fewer workers (GPU-bound, data collected in large batches)
     cpu_count = os.cpu_count() or 8
-    args.num_workers = min(cpu_count // 2, 6) if is_off_policy else min(cpu_count // 4, 4)
+    args.num_workers = min(cpu_count // 2, 2) if is_off_policy else min(cpu_count // 4, 4)
     args.eval_env_class = AlpacaStockVecEnv  # module-level class
     args.eval_env_args = {
         'env_name': 'AlpacaStockVecEnv-v1',
@@ -982,7 +987,7 @@ if __name__ == '__main__':
     parser.add_argument('--download', action='store_true', help='Force re-download data')
     parser.add_argument('--agent', type=str, default='ppo', 
                         choices=list(AGENT_REGISTRY.keys()),
-                        help='Agent: ppo, a2c (on-policy) | sac, modsac, td3, ddpg (off-policy). ModSAC recommended for finance.')
+                        help='Agent: ppo, a2c (on-policy) | sac, modsac, diffusionmodsac, td3, ddpg (off-policy). ModSAC recommended for finance.')
     parser.add_argument('--eval', action='store_true', dest='eval_only',
                         help='Skip training, run validation only')
     parser.add_argument('--checkpoint', type=str, default=None,

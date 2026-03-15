@@ -39,6 +39,8 @@ datasets/
 full_diff.patch
 /notebooks/
 .env
+tmp/
+wandb/
 
 # Train results and logs (CPCV pipeline outputs)
 train_results/

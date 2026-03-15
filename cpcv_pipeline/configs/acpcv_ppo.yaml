@@ -1,0 +1,83 @@
+# PPO Configuration for Adaptive CPCV HPO
+# Usage:
+#   Single run:  python cpcv_pipeline/hpo_cpcv.py --config-name=acpcv_ppo
+#   HPO sweep:   python cpcv_pipeline/hpo_cpcv.py -m --config-name=acpcv_ppo
+#
+# Uses leak-free ACPCV with RSI-based adaptive boundaries
+# + obs-only VecNormalize (matching best training config)
+
+defaults:
+  - _self_
+  - search_space: ppo_space
+  - override hydra/sweeper: HyperSMAC
+
+# Agent
+agent: ppo
+gpu_id: 0
+
+# Cross-validation — Adaptive CPCV
+cv_method: acpcv
+n_groups: 5           # CPCV N
+n_test_groups: 2      # CPCV K → C(5,2) = 10 splits
+embargo_days: 7
+gap_days: 7
+test_ratio: 0.2       # held-out test fraction
+
+# Adaptive CPCV — RSI feature (lower split variance than drawdown)
+acpcv_feature: rsi
+acpcv_window: 63
+n_subsplits: 3
+lower_quantile: 0.25
+upper_quantile: 0.75
+
+# Training
+seed: 1943
+break_step: 500000
+if_single_process: true   # single-process mode — avoids OOM on 8GB GPUs
+num_workers: 2
+
+# Environment
+state_dim: 283
+action_dim: 28
+num_envs: 512             # reduced for 8GB 2080 (HPO runs many trials)
+
+# Hyperparameters (defaults — overridden by search space)
+learning_rate: 1e-4
+gamma: 0.99
+net_arch: "medium"    # small=[64,64], medium=[256,128], large=[512,256]
+batch_size: 512
+repeat_times: 16
+
+# PPO-specific
+ratio_clip: 0.25
+lambda_gae_adv: 0.95
+lambda_entropy: 0.01
+clip_grad_norm: 3.0
+if_use_v_trace: true
+
+# VecNormalize — obs-only normalization (matching winning ACPCV config)
+use_vec_normalize: true
+norm_obs: true
+norm_reward: false
+
+cleanup_checkpoints: true
+
+# Hydra sweeper (SMAC)
+hydra:
+  sweeper:
+    search_space: ${search_space}
+    n_trials: 50
+    resume: true
+    sweeper_kwargs:
+      seeds: [0, 1, 2]
+      max_parallelization: 1
+      maximize: true
+      optimizer_kwargs:
+        smac_facade:
+          _target_: smac.facade.hyperparameter_optimization_facade.HyperparameterOptimizationFacade
+          _partial_: true
+        scenario:
+          n_trials: ${hydra.sweeper.n_trials}
+          deterministic: false
+          n_workers: 1
+          output_directory: ${hydra.sweep.dir}

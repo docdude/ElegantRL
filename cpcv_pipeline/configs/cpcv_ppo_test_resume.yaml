@@ -1,0 +1,72 @@
+# MINIMAL TEST CONFIG — Resume/continuation test
+# 5 trials, 1 seed, holdout CV (1 split), 50k steps
+# Test plan: ran 3 trials, now resuming to add 2 more (total 5)
+
+defaults:
+  - _self_
+  - search_space: ppo_space
+  - override hydra/sweeper: HyperSMAC
+
+# Agent
+agent: ppo
+gpu_id: 0
+
+# Cross-validation — holdout for speed (1 split only)
+cv_method: holdout
+n_groups: 5
+n_test_groups: 2
+embargo_days: 7
+test_ratio: 0.2
+
+# Training — minimal for testing
+seed: 1943
+break_step: 50000       # 50k steps — fast
+
+# Environment
+num_envs: 512            # smaller for fast test
+
+# Hyperparameters (defaults)
+learning_rate: 1e-4
+gamma: 0.995
+net_arch: "small"
+batch_size: 512
+repeat_times: 16
+
+# PPO-specific
+ratio_clip: 0.25
+lambda_gae_adv: 0.95
+lambda_entropy: 0.01
+clip_grad_norm: 3.0
+if_use_v_trace: true
+
+# VecNormalize
+use_vec_normalize: true
+norm_obs: true
+norm_reward: false
+
+cleanup_checkpoints: true
+
+# Hydra sweeper — 5 trials, 1 seed
+hydra:
+  sweeper:
+    search_space: ${search_space}
+    n_trials: 2
+    resume: true
+    sweeper_kwargs:
+      seeds: [0]
+      max_parallelization: 0
+      maximize: true
+      optimizer_kwargs:
+        smac_facade:
+          _target_: smac.facade.hyperparameter_optimization_facade.HyperparameterOptimizationFacade
+          _partial_: true
+        scenario:
+          seed: 1493
+          n_trials: ${hydra.sweeper.n_trials}
+          deterministic: true
+          n_workers: 1
+          output_directory: ${hydra.sweep.dir}
+  run:
+    dir: ./tmp/hpo_test_resume/
+  sweep:
+    dir: ./tmp/hpo_test_resume/

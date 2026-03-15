@@ -1,0 +1,45 @@
+
+defaults:
+  - _self_
+  - target_function: mlp
+  - search_space: mlp
+  - override hydra/sweeper: HyperSMAC
+
+n_folds: 5
+
+hydra:
+  sweeper:
+    n_trials: 50
+    budget_variable: null
+    sweeper_kwargs:
+      max_parallelization: 0
+      optimizer_kwargs:
+        smac_facade:
+          _target_: smac.facade.hyperparameter_optimization_facade.HyperparameterOptimizationFacade
+          _partial_: true
+        intensifier:
+          _target_: smac.intensifier.intensifier.Intensifier
+          _partial_: true
+          max_config_calls: ${n_folds}
+          seed: 0
+        scenario:
+          n_trials: ${hydra.sweeper.n_trials}
+          seed: ${seed}
+          deterministic: true
+          n_workers: 1
+          instances: ["0", "1", "2", "3", "4"]
+          instance_features:
+            "0": [0]
+            "1": [1]
+            "2": [2]
+            "3": [3]
+            "4": [4]
+          output_directory: ${hydra.sweep.dir}
+        smac_kwargs:
+          dask_client: null
+          overwrite: false
+    search_space: ${search_space}
+  run:
+    dir: ./tmp/mlp_smac_cv/
+  sweep:
+    dir: ./tmp/mlp_smac_cv/

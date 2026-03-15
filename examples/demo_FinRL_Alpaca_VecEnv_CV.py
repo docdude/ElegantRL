@@ -927,14 +927,16 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
     gamma = 0.99
     
     # Off-policy agents need reduced parameters to avoid OOM
-    # ReplayBuffer shape: (buffer_size, num_envs, state_dim) - memory scales with BOTH!
-    # L4 (24GB): num_envs=96, buffer_size=100K = ~12GB buffer + ~10GB overhead = fits
-    # Prioritize large buffer for SAC - more important than num_envs for off-policy
+    # ReplayBuffer shape: (buffer_size, num_seqs, state_dim) where num_seqs = num_envs * num_workers
+    # For off-policy, buffer DEPTH matters most — large replay buffer = decorrelated samples,
+    # rare event retention, stable critic fitting. Fewer envs with deeper buffer is optimal.
+    # GPU memory budget (L4 24GB, ~17 GiB for buffer, ~3 GiB headroom):
+    #   8 envs × 2 workers = 16 seqs → buffer_size=1M × 16 × 285 × 4B = 17.0 GiB
     # Note: horizon_len will be set per-fold based on train period length
     if is_off_policy:
-        num_envs = 96       # 96 envs (fits on L4 24GB with large buffer)
+        num_envs = 8        # 8 parallel trajectories (enough for exploration diversity)
         batch_size = 256
-        buffer_size = int(1e5)  # 100K - buffer is (100K, 96, 283) = ~12GB
+        buffer_size = int(1e6)  # 1M deep buffer — maximizes L4 memory utilization
         repeat_times = 2.0      # more gradient updates per sample (like demo_DDPG_TD3_SAC)
         learning_rate = 1e-4    # slightly lower for stability
         net_dims = [256, 128]   # slightly larger network to compensate
@@ -942,7 +944,7 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         soft_update_tau = 5e-3  # target network update rate
         lambda_entropy = None   # Not used by off-policy
         break_step = int(5e5)
-        print(f"   ⚡ Off-policy mode: num_envs={num_envs}, buffer_size={buffer_size:,} (~12GB buffer)")
+        print(f"   ⚡ Off-policy mode: num_envs={num_envs}, buffer_size={buffer_size:,} (deep buffer, ~17GB)")
     else:
         # On-policy config: --h200 maximizes H200 GPU utilization
         # Buffer shape: (horizon_len, num_envs, ~315 floats) × 4 bytes
@@ -1001,8 +1003,11 @@ def run(gpu_id: int = 0, force_download: bool = False, agent_name: str = 'ppo',
         print(f"   📊 VecNormalize: norm_obs=True, norm_reward={norm_reward} (env already scales rewards internally)")
     
     # Dynamic num_workers based on CPU count and policy type
+    # Dynamic num_workers based on CPU count and policy type
+    # IMPORTANT: Off-policy ReplayBuffer has shape (buffer_size, num_envs * num_workers, ...)
+    # so num_workers directly multiplies GPU memory. Cap at 2 for off-policy to fit L4 24GB.
     cpu_count = os.cpu_count() or 8
-    num_workers = min(cpu_count // 2, 6) if is_off_policy else min(cpu_count // 4, 4)
+    num_workers = min(cpu_count // 2, 2) if is_off_policy else min(cpu_count // 4, 4)
     
     # =========================================================================
     # CROSS-VALIDATION TRAINING LOOP

@@ -4,6 +4,7 @@
 # Usage:
 #   Single run:  python cpcv_pipeline/hpo_cpcv.py --config-name=cpcv_ppo_acpcv
 #   HPO sweep:   python cpcv_pipeline/hpo_cpcv.py -m --config-name=cpcv_ppo_acpcv
+#   Resume HPO:  python cpcv_pipeline/hpo_cpcv.py -m --config-name=cpcv_ppo_acpcv ++trial_offset=auto
 #
 # NOTE: GPU memory is auto-scaled by hpo_cpcv.py (same as function_train_test.py)
 
@@ -35,7 +36,7 @@ seed: 1943
 break_step: 500000
 
 # Environment — auto-scaled by GPU memory scaler
-num_envs: 2048
+num_envs: 896
 
 # Hyperparameters (defaults — overridden by search space)
 learning_rate: 1e-4
@@ -59,17 +60,38 @@ norm_reward: false
 # Process control
 # num_workers: omit to let train_split() auto-compute from CPU count
 # (matching optimize_adapt_cpcv.py behavior). GPU memory scaling is automatic.
-cleanup_checkpoints: true
+cleanup_checkpoints: false
+
+# Trial offset for pbo_returns numbering on restart.
+# 0 = fresh run (default), "auto" = continue from last trial, or int.
+# Usage on restart:  ++trial_offset=auto  (++ needed because key already exists in this file)
+trial_offset: 0
+
+# Instance-based CV intensification: SMAC passes instance ID as override.
+# null = legacy mode (train all splits). Set by SMAC Intensifier at runtime.
+instance: null
+
+# Number of CPCV splits — C(5,2) = 10. Used in Intensifier max_config_calls.
+n_splits: 10
 
 # Hydra sweeper
 hydra:
   sweeper:
     search_space: ${search_space}
-    n_trials: 50
+    # n_trials counts SMAC *iterations*, not unique configs.
+    # Each iteration = one (config, instance) eval.  With 10 ACPCV splits
+    # and early termination killing bad configs after ~3-4 folds:
+    #   200 iterations ≈ 25-35 unique configs evaluated
+    #   (vs only ~5-7 configs with n_trials=50)
+    # SMAC's Scenario.n_trials is the authoritative limit; Hypersweeper's
+    # trials_run counter is a secondary check that resets on resume (safe
+    # because SMAC's own counter persists in runhistory.json).
+    n_trials: 200
     resume: true
     sweeper_kwargs:
-      seeds: [0, 1, 2]
-      max_parallelization: 1
+      # seeds: [0, 1, 2]  # Disabled — 1 seed (from YAML seed: 1943) for HPO speed.
+      # Multi-seed evaluation should be done post-HPO on the winning config.
+      max_parallelization: 0
       maximize: true
       # Weights & Biases observability (logs incumbent, iteration stats)
       wandb_project: elegantrl-hpo
@@ -79,8 +101,37 @@ hydra:
         smac_facade:
           _target_: smac.facade.hyperparameter_optimization_facade.HyperparameterOptimizationFacade
           _partial_: true
+        # Intensifier: evaluate configs on individual CV folds (instances).
+        # Bad configs are eliminated early after poor performance on 3-4 folds
+        # instead of wasting compute on all 10. Matches SMAC3 CV example.
+        intensifier:
+          _target_: smac.intensifier.intensifier.Intensifier
+          _partial_: true
+          max_config_calls: ${n_splits}
+          seed: 0
         scenario:
+          seed: 1493
           n_trials: ${hydra.sweeper.n_trials}
-          deterministic: false
+          deterministic: true
           n_workers: 1
+          # Each ACPCV fold = one SMAC instance → per-split persistence + early termination
+          instances: ["split_0", "split_1", "split_2", "split_3", "split_4", "split_5", "split_6", "split_7", "split_8", "split_9"]
+          instance_features:
+            "split_0": [0]
+            "split_1": [1]
+            "split_2": [2]
+            "split_3": [3]
+            "split_4": [4]
+            "split_5": [5]
+            "split_6": [6]
+            "split_7": [7]
+            "split_8": [8]
+            "split_9": [9]
           output_directory: ${hydra.sweep.dir}
+        smac_kwargs:
+          dask_client: null
+          overwrite: false
+  run:
+    dir: ./tmp/hpo_acpcv_ppo/
+  sweep:
+    dir: ./tmp/hpo_acpcv_ppo/

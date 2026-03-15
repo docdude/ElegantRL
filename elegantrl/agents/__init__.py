@@ -12,3 +12,6 @@ from .AgentSAC import AgentSAC, AgentModSAC
 # on-policy
 from .AgentPPO import AgentPPO, AgentDiscretePPO
 from .AgentPPO import AgentA2C, AgentDiscreteA2C
+
+# diffusion
+from .AgentDiffusionMODSAC import AgentDiffusionModSAC

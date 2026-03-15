@@ -19,13 +19,14 @@ Data Layout:
 
 Usage:
     # Single run (test config)
-    python cpcv_pipeline/hpo_cpcv.py --config-name=cpcv_ppo
+    python -m cpcv_pipeline.hpo_cpcv --config-name=cpcv_ppo
 
-    # HPO sweep with SMAC
-    python cpcv_pipeline/hpo_cpcv.py -m --config-name=cpcv_ppo
+    # HPO sweep with SMAC (-m / --multirun triggers Hypersweeper)
+    python -m cpcv_pipeline.hpo_cpcv -m --config-name=cpcv_ppo
+    python -m cpcv_pipeline.hpo_cpcv --multirun --config-name=cpcv_ppo
 
-    # ACPCV with RSI feature
-    python cpcv_pipeline/hpo_cpcv.py --config-name=cpcv_ppo_acpcv
+    # ACPCV HPO sweep with RSI feature
+    python -m cpcv_pipeline.hpo_cpcv -m --config-name=cpcv_ppo_acpcv
 
 References:
     - López de Prado (2018): "Advances in Financial Machine Learning" — CPCV
@@ -324,6 +325,157 @@ def compute_equal_weight_benchmark(
 
 
 # =============================================================================
+# SINGLE-SPLIT TRAINING (for CV intensification)
+# =============================================================================
+
+def _train_single_split(
+    split_idx: int,
+    splits: list,
+    hpo_close: np.ndarray,
+    hpo_tech: np.ndarray,
+    agent_name: str,
+    erl_params: dict,
+    env_params: dict,
+    hpo_cwd: str,
+    gpu_id: int,
+    seed: int,
+    use_vec_normalize: bool,
+    vec_normalize_kwargs: dict,
+    num_workers_cfg,
+    trial_id: str,
+    pbo_returns_dir: str,
+) -> float:
+    """
+    Train and evaluate on a single CV split (instance-based intensification).
+
+    Called when SMAC's Intensifier assigns a specific instance (fold index).
+    Returns the composite objective for that single split.
+    SMAC handles aggregation, early termination, and per-split persistence.
+    """
+    train_indices, val_indices = splits[split_idx]
+    n_val = len(val_indices)
+    if n_val < 3:
+        print(f"  Split {split_idx}: skipping (val too short: {n_val} days)")
+        return 0.0  # bad config signal
+
+    net_dims = erl_params['net_dims']
+    is_off_policy = agent_name in OFF_POLICY_AGENTS
+
+    # ── Train ──
+    result = train_split(
+        split_idx=split_idx,
+        train_indices=train_indices,
+        test_indices=val_indices,
+        close_ary=hpo_close,
+        tech_ary=hpo_tech,
+        model_name=agent_name,
+        erl_params=erl_params,
+        env_params=env_params,
+        cwd_base=hpo_cwd,
+        gpu_id=gpu_id,
+        random_seed=seed,
+        use_vec_normalize=use_vec_normalize,
+        vec_normalize_kwargs=vec_normalize_kwargs,
+        continue_train=False,
+        num_workers=num_workers_cfg,
+    )
+
+    # ── Evaluate ALL checkpoints → pick best by composite objective ──
+    split_cwd = result.get('cwd', '')
+    sharpe_agent = 0.0
+    agent_return = 0.0
+
+    bench = compute_equal_weight_benchmark(hpo_close, val_indices)
+    sharpe_bench = bench['sharpe']
+    bench_return = bench['total_return']
+
+    if split_cwd and os.path.isdir(split_cwd):
+        import re as _re
+        _ckpt_pattern = _re.compile(
+            r'^actor__(\d+)(?:_(\d+\.\d+))?\.pt$'
+        )
+        all_ckpts = []
+        for f in os.listdir(split_cwd):
+            m = _ckpt_pattern.match(f)
+            if m:
+                all_ckpts.append({
+                    'path': os.path.join(split_cwd, f),
+                    'filename': f,
+                    'step': int(m.group(1)),
+                })
+        act_path = os.path.join(split_cwd, 'act.pth')
+        if os.path.exists(act_path):
+            max_step = max((c['step'] for c in all_ckpts), default=0)
+            all_ckpts.append({
+                'path': act_path,
+                'filename': 'act.pth',
+                'step': max_step + 1,
+            })
+
+        vec_norm_path = (
+            os.path.join(split_cwd, 'vec_normalize.pt')
+            if use_vec_normalize else None
+        )
+
+        best_composite = -float('inf')
+        best_eval = None
+        best_ckpt_name = None
+        n_ckpts = len(all_ckpts)
+        print(f"  Split {split_idx}: evaluating {n_ckpts} checkpoints...")
+
+        for ckpt in all_ckpts:
+            try:
+                eval_result = evaluate_agent_on_indices(
+                    checkpoint_path=ckpt['path'],
+                    indices=val_indices,
+                    close_ary=hpo_close,
+                    tech_ary=hpo_tech,
+                    model_name=agent_name,
+                    net_dims=net_dims,
+                    gpu_id=gpu_id,
+                    vec_normalize_path=vec_norm_path,
+                    num_envs=1,
+                )
+                sr = eval_result['sharpe']
+                ret_pct = eval_result['final_return'] * 100
+                _alpha = ret_pct / 100.0 - bench_return
+                _comp = sr + ALPHA_WEIGHT * _alpha
+                if _comp > best_composite:
+                    best_composite = _comp
+                    best_eval = eval_result
+                    best_ckpt_name = ckpt['filename']
+            except Exception as e:
+                print(f"    {ckpt['filename']}: eval failed ({e})")
+                continue
+
+        if best_eval is not None:
+            sharpe_agent = best_eval['sharpe']
+            agent_return = best_eval['final_return'] * 100
+
+            # Save PBO daily returns
+            daily_rets = np.array(best_eval['daily_returns'])
+            npy_path = os.path.join(
+                pbo_returns_dir,
+                f"trial_{trial_id}_split_{split_idx}.npy",
+            )
+            np.save(npy_path, daily_rets)
+            print(f"    Best: {best_ckpt_name} "
+                  f"(SR={sharpe_agent:.4f}, ret={agent_return:.1f}%)")
+        else:
+            print(f"  Split {split_idx}: all evals failed, using SR=0")
+
+    alpha = agent_return / 100.0 - bench_return
+    composite = sharpe_agent + ALPHA_WEIGHT * alpha
+
+    print(f"  Split {split_idx}: composite={composite:.4f}, "
+          f"SR={sharpe_agent:.4f}, alpha={alpha:+.4f}, "
+          f"bench_SR={sharpe_bench:.4f}")
+
+    th.cuda.empty_cache()
+    return composite
+
+
+# =============================================================================
 # MAIN HPO TRAINING FUNCTION
 # =============================================================================
 
@@ -337,13 +489,22 @@ def train_and_evaluate(cfg: DictConfig) -> float:
     GPU memory scaling, VecNormalize, and multi-worker logic are identical.
 
     Returns:
-        float: Negative composite objective (Hypersweeper minimizes).
-               Composite = SR + 0.1 * alpha, where alpha = agent_return - bench_return.
+        float: Composite objective (SR + 0.1 * alpha).
+               When instance is set (CV intensification mode), returns single-split cost.
+               When instance is None (legacy mode), returns mean across all splits.
+               Hypersweeper handles maximize=true internally.
     """
     # === CONFIGURATION ===
     agent_name = cfg.get('agent', 'ppo').lower()
     gpu_id = cfg.get('gpu_id', 0)
     seed = cfg.get('seed', 42)
+
+    # Instance-based CV intensification: if set, train only this split.
+    # SMAC's Intensifier passes instance as a string ("split_0", "split_1", ...)
+    # via Hypersweeper's override mechanism.
+    instance = cfg.get('instance', None)
+    if instance is not None:
+        instance = int(str(instance).replace('split_', ''))
 
     cv_method = cfg.get('cv_method', 'cpcv')
     n_folds = cfg.get('n_folds', 3)
@@ -479,6 +640,11 @@ def train_and_evaluate(cfg: DictConfig) -> float:
     num_workers_cfg = cfg.get('num_workers', None)
     # None = let train_split() compute from CPU count (same as optimize scripts)
 
+    # Artifact preservation: when False, archive each trial's split directory
+    # (recorder.npy, vec_normalize.pt, checkpoints, LearningCurve.jpg) to a
+    # trial-specific path so they survive being overwritten by the next trial.
+    cleanup_checkpoints = cfg.get('cleanup_checkpoints', True)
+
     # HPO output directory
     hpo_cwd = os.path.join(
         str(_SCRIPT_DIR / "train_results"),
@@ -489,16 +655,43 @@ def train_and_evaluate(cfg: DictConfig) -> float:
     pbo_returns_dir = os.path.join(hpo_cwd, "pbo_returns")
     os.makedirs(pbo_returns_dir, exist_ok=True)
 
-    # Trial ID: Hydra multirun job number, or fallback to timestamp
+    # Trial ID: Hydra job.num + trial_offset to survive restarts.
+    # Hydra's job.num resets to 0 on restart, which would overwrite old
+    # pbo_returns files. Use +trial_offset=auto (or a specific number) on
+    # restart to continue numbering from the last existing trial.
+    # SMAC's runhistory.json is the canonical persistence layer — it maps
+    # config_id → hyperparams and tracks which (config, instance) pairs
+    # have been evaluated.  The PBO .npy files are supplementary.
     try:
-        trial_id = str(HydraConfig.get().job.num)
+        job_num = HydraConfig.get().job.num
     except Exception:
-        import time
-        trial_id = str(int(time.time()))
+        job_num = 0
 
+    # trial_offset: 0 (default, fresh run), "auto" (scan pbo_returns), or int
+    # When "auto", trial_id = max_existing_trial + 1 (ignores job.num to avoid
+    # quadratic growth from re-scanning on every call).
+    # When int, trial_id = job.num + offset (legacy; use on fresh runs).
+    trial_offset_cfg = cfg.get('trial_offset', 0)
+    if trial_offset_cfg == 'auto':
+        _existing_max = -1
+        if os.path.isdir(pbo_returns_dir):
+            import re as _re_trial
+            for _fn in os.listdir(pbo_returns_dir):
+                _m = _re_trial.match(r'trial_(\d+)_split_\d+\.npy$', _fn)
+                if _m:
+                    _existing_max = max(_existing_max, int(_m.group(1)))
+        trial_id = str(_existing_max + 1) if _existing_max >= 0 else str(job_num)
+        if job_num == 0:
+            print(f"  trial_offset=auto: found max trial {_existing_max}, "
+                  f"trial_id={trial_id}")
+    else:
+        _offset = int(trial_offset_cfg)
+        trial_id = str(job_num + _offset)
+
+    instance_str = f" | Instance: {instance}" if instance is not None else ""
     print(f"\n{'='*60}")
     print(f"HPO Trial {trial_id}: {agent_name.upper()} | Seed: {seed} | "
-          f"CV: {cv_method} ({n_splits} splits)")
+          f"CV: {cv_method} ({n_splits} splits){instance_str}")
     print(f"{'='*60}")
     print(f"| net_dims: {net_dims}, lr: {learning_rate}, gamma: {gamma}")
     print(f"| break_step: {break_step:,}, num_envs: {num_envs}")
@@ -506,8 +699,78 @@ def train_and_evaluate(cfg: DictConfig) -> float:
           f"norm_obs: {norm_obs}, norm_reward: {norm_reward}")
 
     # =========================================================================
-    # TRAIN + EVALUATE ACROSS ALL CV SPLITS
-    # Uses train_split() — identical to optimize_cpcv / optimize_adapt_cpcv
+    # INSTANCE MODE: Train + evaluate a SINGLE split (CV intensification)
+    # SMAC's Intensifier decides which splits to evaluate and can eliminate
+    # bad configs early after just 3-4 splits instead of all 10.
+    # =========================================================================
+    if instance is not None:
+        composite = _train_single_split(
+            split_idx=instance,
+            splits=splits,
+            hpo_close=hpo_close,
+            hpo_tech=hpo_tech,
+            agent_name=agent_name,
+            erl_params=erl_params,
+            env_params=env_params,
+            hpo_cwd=hpo_cwd,
+            gpu_id=gpu_id,
+            seed=seed,
+            use_vec_normalize=use_vec_normalize,
+            vec_normalize_kwargs=vec_normalize_kwargs,
+            num_workers_cfg=num_workers_cfg,
+            trial_id=trial_id,
+            pbo_returns_dir=pbo_returns_dir,
+        )
+
+        # Save per-instance metadata so PBO .npy files can be linked back
+        # to hyperparams.  SMAC's runhistory.json is the primary record;
+        # this is a convenience for standalone post-hoc scripts.
+        instance_meta = {
+            'trial_id': trial_id,
+            'job_num': job_num,
+            'split_idx': instance,
+            'composite': float(composite),
+            'hyperparams': {
+                'net_dims': net_dims,
+                'learning_rate': learning_rate,
+                'gamma': gamma,
+                'batch_size': batch_size,
+                'repeat_times': repeat_times,
+                'num_envs': num_envs,
+                'ratio_clip': erl_params.get('ratio_clip'),
+                'lambda_gae_adv': erl_params.get('lambda_gae_adv'),
+                'lambda_entropy': erl_params.get('lambda_entropy'),
+                'clip_grad_norm': clip_grad_norm,
+                'net_arch': cfg.get('net_arch', None),
+            },
+        }
+        meta_path = os.path.join(
+            pbo_returns_dir,
+            f"trial_{trial_id}_split_{instance}_meta.json",
+        )
+        with open(meta_path, 'w') as f:
+            json.dump(instance_meta, f, indent=2)
+
+        # ── Archive per-trial artifacts for post-hoc visual analysis ──────
+        # train_split() uses if_remove=True, so the split_X/ directory is
+        # wiped by the next trial that trains on the same split.  Copy the
+        # full directory to a trial-specific archive so checkpoints,
+        # recorder.npy, vec_normalize.pt, and LearningCurve.jpg survive.
+        if not cleanup_checkpoints:
+            split_cwd = os.path.join(hpo_cwd, f"split_{instance}")
+            archive_dir = os.path.join(
+                hpo_cwd, "trial_archives",
+                f"trial_{trial_id}_split_{instance}",
+            )
+            if os.path.isdir(split_cwd):
+                os.makedirs(os.path.dirname(archive_dir), exist_ok=True)
+                shutil.copytree(split_cwd, archive_dir, dirs_exist_ok=True)
+                print(f"    Archived split artifacts -> {archive_dir}")
+
+        return composite
+
+    # =========================================================================
+    # LEGACY MODE: Train + evaluate ALL CV splits (no intensification)
     # =========================================================================
 
     sharpe_agent_list = []
@@ -540,59 +803,98 @@ def train_and_evaluate(cfg: DictConfig) -> float:
             num_workers=num_workers_cfg,
         )
 
-        # ── Evaluate best checkpoint with proper OOS Sharpe ──────────────
-        # avgR (from recorder) is % of initial capital — good for checkpoint
-        # selection during training, but Sharpe is the proper risk-adjusted
-        # metric for HPO.  We find the best checkpoint by avgR, then run a
-        # deterministic eval episode on the val fold to compute Sharpe from
-        # actual daily returns.  This matches eval_all_checkpoints logic.
+        # ── Evaluate ALL checkpoints → pick best by composite objective ──
+        # Training avgR (in the .pt filename) does NOT reliably predict OOS
+        # performance.  Many checkpoints lack avgR in the name entirely.
+        # Instead, evaluate every checkpoint on the val fold and select the
+        # one with the highest composite = SR + 0.1 * alpha — the SAME
+        # objective that HPO is optimizing across trials.
+        import re as _re
         split_cwd = result.get('cwd', '')
         sharpe_agent = 0.0
         agent_return = 0.0
         best_avgR = result.get('best_avgR', 0.0)
 
-        # Find the best checkpoint file (saved by evaluator when avgR improves)
-        best_ckpt = None
+        # Compute benchmark FIRST — needed to score each checkpoint
+        bench = compute_equal_weight_benchmark(hpo_close, val_indices)
+        sharpe_bench = bench['sharpe']
+        bench_return = bench['total_return']
+
         if split_cwd and os.path.isdir(split_cwd):
-            # act.pth is always updated to the latest best actor
+            # Discover all checkpoints (actor__*.pt + act.pth)
+            _ckpt_pattern = _re.compile(
+                r'^actor__(\d+)(?:_(\d+\.\d+))?\.pt$'
+            )
+            all_ckpts = []
+            for f in os.listdir(split_cwd):
+                m = _ckpt_pattern.match(f)
+                if m:
+                    all_ckpts.append({
+                        'path': os.path.join(split_cwd, f),
+                        'filename': f,
+                        'step': int(m.group(1)),
+                    })
             act_path = os.path.join(split_cwd, 'act.pth')
             if os.path.exists(act_path):
-                best_ckpt = act_path
+                max_step = max((c['step'] for c in all_ckpts), default=0)
+                all_ckpts.append({
+                    'path': act_path,
+                    'filename': 'act.pth',
+                    'step': max_step + 1,
+                })
 
-        if best_ckpt:
             # VecNormalize stats (if used)
             vec_norm_path = os.path.join(split_cwd, 'vec_normalize.pt') \
                 if use_vec_normalize else None
 
-            try:
-                eval_result = evaluate_agent_on_indices(
-                    checkpoint_path=best_ckpt,
-                    indices=val_indices,
-                    close_ary=hpo_close,
-                    tech_ary=hpo_tech,
-                    model_name=agent_name,
-                    net_dims=net_dims,
-                    gpu_id=gpu_id,
-                    vec_normalize_path=vec_norm_path,
-                    num_envs=1,  # deterministic single-env eval
-                )
-                sharpe_agent = eval_result['sharpe']
-                agent_return = eval_result['final_return'] * 100  # as %
+            # Evaluate each checkpoint, track the best by composite objective
+            best_composite = -float('inf')
+            best_eval = None
+            best_ckpt_name = None
+            n_ckpts = len(all_ckpts)
+            print(f"  Split {split_idx}: evaluating {n_ckpts} checkpoints on val fold...")
+
+            for ci, ckpt in enumerate(all_ckpts):
+                try:
+                    eval_result = evaluate_agent_on_indices(
+                        checkpoint_path=ckpt['path'],
+                        indices=val_indices,
+                        close_ary=hpo_close,
+                        tech_ary=hpo_tech,
+                        model_name=agent_name,
+                        net_dims=net_dims,
+                        gpu_id=gpu_id,
+                        vec_normalize_path=vec_norm_path,
+                        num_envs=1,  # deterministic single-env eval
+                    )
+                    sr = eval_result['sharpe']
+                    ret_pct = eval_result['final_return'] * 100
+                    _alpha = ret_pct / 100.0 - bench_return
+                    _comp = sr + ALPHA_WEIGHT * _alpha
+                    if _comp > best_composite:
+                        best_composite = _comp
+                        best_eval = eval_result
+                        best_ckpt_name = ckpt['filename']
+                except Exception as e:
+                    print(f"    {ckpt['filename']}: eval failed ({e})")
+                    continue
+
+            if best_eval is not None:
+                sharpe_agent = best_eval['sharpe']
+                agent_return = best_eval['final_return'] * 100  # as %
 
                 # Save daily returns for PBO matrix construction
-                daily_rets = np.array(eval_result['daily_returns'])
+                daily_rets = np.array(best_eval['daily_returns'])
                 npy_path = os.path.join(
                     pbo_returns_dir,
                     f"trial_{trial_id}_split_{split_idx}.npy",
                 )
                 np.save(npy_path, daily_rets)
-            except Exception as e:
-                print(f"  Split {split_idx}: eval failed ({e}), using Sharpe=0")
-
-        # Benchmark: equal-weight buy-and-hold on same val indices
-        bench = compute_equal_weight_benchmark(hpo_close, val_indices)
-        sharpe_bench = bench['sharpe']
-        bench_return = bench['total_return']
+                print(f"    Best: {best_ckpt_name} "
+                      f"(composite={best_composite:.4f}, "
+                      f"SR={sharpe_agent:.4f}, ret={agent_return:.1f}%)")
+            else:
+                print(f"  Split {split_idx}: all evals failed, using Sharpe=0")
 
         # Composite objective: SR + 0.1 * alpha  (alpha = excess return)
         alpha = agent_return / 100.0 - bench_return  # both as fractions
@@ -608,12 +910,19 @@ def train_and_evaluate(cfg: DictConfig) -> float:
               f"composite={composite:.4f}, avgR={best_avgR:.1f}, "
               f"Bench SR={sharpe_bench:.4f}")
 
-        # ── Cleanup checkpoints (HPO doesn't need them) ──────────────────
-        if cfg.get('cleanup_checkpoints', True) and os.path.isdir(split_cwd):
-            try:
-                shutil.rmtree(split_cwd)
-            except Exception:
-                pass
+        # ── Archive per-trial artifacts for post-hoc visual analysis ────
+        # train_split() uses if_remove=True so split_X/ is wiped by the
+        # next trial.  Archive to trial-specific directory when requested.
+        if not cleanup_checkpoints:
+            split_cwd = os.path.join(hpo_cwd, f"split_{split_idx}")
+            archive_dir = os.path.join(
+                hpo_cwd, "trial_archives",
+                f"trial_{trial_id}_split_{split_idx}",
+            )
+            if os.path.isdir(split_cwd):
+                os.makedirs(os.path.dirname(archive_dir), exist_ok=True)
+                shutil.copytree(split_cwd, archive_dir, dirs_exist_ok=True)
+                print(f"    Archived split artifacts -> {archive_dir}")
 
         # Free GPU memory between splits
         th.cuda.empty_cache()
