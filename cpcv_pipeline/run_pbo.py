@@ -207,7 +207,9 @@ def build_matrix_M_from_hpo_trials(
     if not M_cols:
         raise ValueError("No valid trial data found")
 
-    M = np.column_stack(M_cols)
+    # Equalize across trials (different splits may have different test lengths)
+    M_equalized = _equalize_array_lengths(M_cols)
+    M = M_equalized  # already (T, N_trials)
     metadata = {
         'n_trials': len(M_cols),
         'total_rows': M.shape[0],

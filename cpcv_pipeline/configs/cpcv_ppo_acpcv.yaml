@@ -86,7 +86,7 @@ hydra:
     # SMAC's Scenario.n_trials is the authoritative limit; Hypersweeper's
     # trials_run counter is a secondary check that resets on resume (safe
     # because SMAC's own counter persists in runhistory.json).
-    n_trials: 200
+    n_trials: 300
     resume: true
     sweeper_kwargs:
       # seeds: [0, 1, 2]  # Disabled — 1 seed (from YAML seed: 1943) for HPO speed.
@@ -109,6 +109,12 @@ hydra:
           _partial_: true
           max_config_calls: ${n_splits}
           seed: 0
+        # Initial design: cap Sobol at 25 so SMAC runs 3 more Sobol
+        # configs (22 already done), then transitions to BO.
+        initial_design:
+          _target_: smac.initial_design.sobol_design.SobolInitialDesign
+          _partial_: true
+          n_configs: 25
         scenario:
           seed: 1493
           n_trials: ${hydra.sweeper.n_trials}
