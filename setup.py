@@ -9,10 +9,16 @@ setup(
     license="Apache 2.0",
     packages=find_packages(),
     install_requires=[
-        "th",
+        "torch",
         "numpy",
         "gymnasium",
         "matplotlib",
+        "pandas",
+        "numba",
+        "RiskLabAI",
+        "scikit-learn",
+        "xgboost",
+        "scipy",
     ],
     description="Lightweight, Efficient and Stable DRL Implementation Using PyTorch",
     classifiers=[

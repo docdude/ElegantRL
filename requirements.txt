@@ -3,10 +3,18 @@ torch
 
 # data handling
 numpy
+pandas
 
 # plot/simulation
 matplotlib
 gymnasium
+
+# Wyckoff data pipeline
+numba
+RiskLabAI
+scikit-learn
+xgboost
+scipy
 
 # profiling (no necessary)
 wandb
