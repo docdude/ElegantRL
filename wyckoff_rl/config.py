@@ -16,8 +16,8 @@ import operator as op
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "wyckoff_rl", "data")
 
-# Default NPZ — use the consensus feature-selected variant
-WYCKOFF_NPZ_PATH = os.path.join(DATA_DIR, "wyckoff_nq_selected.npz")
+# Default NPZ — z-score + tanh normalized features
+WYCKOFF_NPZ_PATH = os.path.join(DATA_DIR, "wyckoff_nq_normalized.npz")
 
 # Results
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "wyckoff_effort", "rl_results")

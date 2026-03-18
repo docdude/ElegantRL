@@ -147,8 +147,8 @@ class WyckoffTradingEnv:
         state = np.concatenate([
             np.array([
                 float(self.position),
-                unrealized / self.initial_amount,
-                self.cash / self.initial_amount,
+                np.tanh(unrealized / self.initial_amount),
+                np.tanh(self.cash / self.initial_amount),
             ], dtype=np.float32),
             self.tech_ary[self.day],
         ])
@@ -371,11 +371,11 @@ class WyckoffTradingVecEnv:
         # Unrealized PnL: position * (current_price - entry_price)
         unrealized = pos_f * (price - self.entry_price)
 
-        # State: [position, unrealized_pnl_norm, cash_norm, tech_features...]
+        # State: [position, tanh(unrealized_pnl_norm), tanh(cash_norm), tech_features...]
         state = th.zeros(self.num_envs, self.state_dim, dtype=th.float32, device=self.device)
         state[:, 0] = pos_f
-        state[:, 1] = unrealized / self.initial_amount
-        state[:, 2] = self.cash / self.initial_amount
+        state[:, 1] = th.tanh(unrealized / self.initial_amount)
+        state[:, 2] = th.tanh(self.cash / self.initial_amount)
         state[:, 3:] = self.tech_factor[self.day].unsqueeze(0).expand(self.num_envs, -1)
         return state
 
