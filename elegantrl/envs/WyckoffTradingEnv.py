@@ -336,6 +336,11 @@ class WyckoffTradingVecEnv:
         self._stagger = episode_len is not None and episode_len < self.max_step
         self._episode_len = episode_len if self._stagger else self.max_step
 
+        # vmap functions (following StockTradingVecEnv pattern from the paper)
+        self.vmap_get_state = th.vmap(
+            func=lambda pos, unreal, cash, techs: th.cat((pos, unreal, cash, techs)),
+            in_dims=(0, 0, 0, 0), out_dims=0)
+
         # State tracking (set in reset)
         self.day = None           # (num_envs,) long — per-env position in data
         self.step_count = None    # (num_envs,) long — steps within current sub-episode
@@ -393,24 +398,20 @@ class WyckoffTradingVecEnv:
         return self.get_state(), {}
 
     def get_state(self):
-        """Return (num_envs, state_dim) tensor."""
+        """Return (num_envs, state_dim) tensor using vmap."""
         price = self.close_price[self.day]           # (num_envs,) per-env price
-        pos_f = self.position.float()
-        unrealized = pos_f * (price - self.entry_price)
-
-        state = th.zeros(self.num_envs, self.state_dim, dtype=th.float32, device=self.device)
-        state[:, 0] = pos_f
-        state[:, 1] = th.tanh(unrealized / self.initial_amount)
-        state[:, 2] = th.tanh(self.cash / self.initial_amount)
-        state[:, 3:] = self.tech_factor[self.day]    # (num_envs, n_features)
-        return state
+        pos_f = self.position.float().unsqueeze(1)   # (num_envs, 1)
+        unrealized = (pos_f * (price - self.entry_price).unsqueeze(1))
+        return self.vmap_get_state(
+            pos_f,
+            (unrealized / self.initial_amount).tanh(),
+            (self.cash / self.initial_amount).tanh().unsqueeze(1),
+            self.tech_factor[self.day])              # (num_envs, n_features)
 
     def step(self, action):
         """
-        Vectorized step with per-env day tracking and auto-reset.
-
-        Returns: state (num_envs, state_dim), reward (num_envs,),
-                 done (num_envs, bool), truncate (num_envs, bool), info dict
+        Branchless vectorized step with per-env day tracking and auto-reset.
+        Uses th.where instead of if-branches to avoid GPU synchronization.
         """
         # Decode action → target position {-1, 0, +1}
         if action.dim() == 2:
@@ -425,32 +426,29 @@ class WyckoffTradingVecEnv:
         curr_price = self.close_price[self.day]                 # (num_envs,)
 
         old_pos = self.position
-        pos_changed = target_pos != old_pos
+        pos_changed = (target_pos != old_pos)
         pos_f = old_pos.float()
 
-        # Close existing position where changed and had a position
+        # Branchless position close: PnL realized where position changed AND had position
         had_pos = pos_changed & (old_pos != 0)
-        if had_pos.any():
-            pnl = pos_f[had_pos] * (curr_price[had_pos] - self.entry_price[had_pos])
-            self.cash[had_pos] += pnl - self.cost_per_trade
+        close_pnl = pos_f * (curr_price - self.entry_price) - self.cost_per_trade
+        self.cash = th.where(had_pos, self.cash + close_pnl, self.cash)
 
-        # Open new position where changed and target != 0
+        # Branchless position open: set entry price and deduct cost where opening new position
         opening = pos_changed & (target_pos != 0)
-        if opening.any():
-            self.entry_price[opening] = curr_price[opening]
-            self.cash[opening] -= self.cost_per_trade
+        self.entry_price = th.where(opening, curr_price, self.entry_price)
+        self.cash = th.where(opening, self.cash - self.cost_per_trade, self.cash)
 
-        # Clear entry price for flat positions
+        # Branchless flat: clear entry price where going flat
         going_flat = pos_changed & (target_pos == 0)
-        if going_flat.any():
-            self.entry_price[going_flat] = 0.0
+        self.entry_price = th.where(going_flat, th.zeros_like(self.entry_price), self.entry_price)
 
         self.position = target_pos
 
-        # Portfolio value
+        # Portfolio value (branchless)
         new_pos_f = target_pos.float()
         unrealized = new_pos_f * (curr_price - self.entry_price)
-        unrealized[target_pos == 0] = 0.0
+        unrealized = th.where(target_pos == 0, th.zeros_like(unrealized), unrealized)
         new_total = self.initial_amount + self.cash + unrealized
         prev_total = self.total_asset
 
@@ -462,28 +460,27 @@ class WyckoffTradingVecEnv:
 
         # Per-env done: sub-episode finished OR hit end of data
         done = (self.step_count >= self._episode_len) | (self.day >= self.max_step)
+        done_f = done.float()
 
+        # Branchless terminal handling: force-close positions for done envs
+        done_has_pos = done & (self.position != 0)
+        term_pnl = self.position.float() * (curr_price - self.entry_price) - self.cost_per_trade
+        self.cash = th.where(done_has_pos, self.cash + term_pnl, self.cash)
+        self.position = th.where(done, th.zeros_like(self.position), self.position)
+        self.entry_price = th.where(done, th.zeros_like(self.entry_price), self.entry_price)
+        self.total_asset = th.where(done, self.initial_amount + self.cash, self.total_asset)
+
+        # Terminal reward bonus: mean_reward / (1 - gamma)
+        safe_count = th.clamp(self.reward_count.float(), min=1)
+        mean_r = self.reward_sum / safe_count
+        reward = reward + done_f * mean_r / (1.0 - self.gamma)
+
+        # Save cumulative returns (list for evaluator compatibility)
+        done_returns = (self.total_asset / self.initial_amount * 100)
+        # Update only done envs — this is a small CPU-side update, runs rarely
         if done.any():
-            # Force close positions for done envs
-            has_pos = done & (self.position != 0)
-            if has_pos.any():
-                pf = self.position[has_pos].float()
-                pnl = pf * (curr_price[has_pos] - self.entry_price[has_pos])
-                self.cash[has_pos] += pnl - self.cost_per_trade
-                self.position[has_pos] = 0
-                self.entry_price[has_pos] = 0.0
-                self.total_asset[has_pos] = self.initial_amount + self.cash[has_pos]
-
-            # Terminal reward bonus: mean_reward / (1 - gamma)
-            mean_r = self.reward_sum[done] / th.clamp(self.reward_count[done].float(), min=1)
-            reward[done] = reward[done] + mean_r / (1.0 - self.gamma)
-
-            # Save cumulative returns (list for evaluator compatibility)
-            done_returns = (self.total_asset[done] / self.initial_amount * 100)
-            for i, idx in enumerate(th.where(done)[0]):
-                self.cumulative_returns[idx.item()] = done_returns[i].item()
-
-            # Auto-reset only the done envs
+            for i in th.where(done)[0].tolist():
+                self.cumulative_returns[i] = done_returns[i].item()
             self._auto_reset(done)
 
         state = self.get_state()
