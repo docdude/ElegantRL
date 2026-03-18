@@ -62,6 +62,7 @@ DEFAULT_ENV_PARAMS = {
     "cost_per_trade": 0.5,          # points per side (covers commission + slippage)
     "reward_mode": "pnl",           # "pnl", "log_ret", "sharpe", "sortino"
     "reward_scale": 1.0,
+    "num_envs": 256,                # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
 }
 
 
@@ -86,7 +87,7 @@ DEFAULT_ERL_PARAMS = {
     "lambda_gae_adv": 0.95,
     "if_use_v_trace": True,
     "eval_per_step": 5_000,
-    "eval_times": 16,
+    "eval_times": 32,
 }
 
 

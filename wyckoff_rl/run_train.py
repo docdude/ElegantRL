@@ -5,7 +5,7 @@ Wyckoff RL — Adaptive CPCV Training Script.
 Trains a DRL agent on NQ range bars with Wyckoff features using
 Adaptive Combinatorial Purged K-Fold Cross-Validation.
 
-Uses the single-instrument WyckoffTradingEnv (not vectorized).
+Uses the GPU-vectorized WyckoffTradingVecEnv with multiprocessing.
 Designed to run on Lightning AI Studio or any GPU machine.
 
 Usage:
