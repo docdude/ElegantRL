@@ -61,7 +61,7 @@ DEFAULT_ENV_PARAMS = {
     "initial_amount": 1000.0,       # in NQ points
     "cost_per_trade": 0.5,          # points per side (covers commission + slippage)
     "reward_mode": "pnl",           # "pnl", "log_ret", "sharpe", "sortino"
-    "reward_scale": 1.0,
+    "reward_scale": 2**5,           # 32; targets cumR ~256 per 4096-step episode (author convention)
     "num_envs": 256,                # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
     "episode_len": 4096,            # sub-episode length for PPO (None = full data)
 }
