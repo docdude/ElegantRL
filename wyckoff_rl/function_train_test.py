@@ -213,13 +213,10 @@ def train_split(
         'episode_len': episode_len,
     }
 
-    # Cap eval walkthrough for training speed — full eval done post-training
-    eval_max_step = min(test_max_step, env_params.get('eval_max_step', 20_000))
-
     eval_env_args = env_args.copy()
     eval_env_args.update({
-        'max_step': eval_max_step,
-        'end_idx': min(n_test, eval_max_step + 1),
+        'max_step': test_max_step,
+        'end_idx': n_test,
         'npz_path': test_npz,
         'episode_len': None,  # eval walks test data, no sub-episodes
     })
