@@ -168,14 +168,16 @@ def train_split(
         # Fixed overhead: CUDA contexts for each training process
         # Measured: workers ~445 MiB, learner ~205 MiB, evaluator ~164 MiB
         fixed_overhead = _num_workers * 445 * 1024**2 + 205 * 1024**2 + 164 * 1024**2
-        buffer_budget = usable - fixed_overhead
-        # 5 tensors per step per env: states, actions, rewards, logprobs, undones
-        bytes_per_step = (state_dim + action_dim + 3) * 4
+        buffer_budget = (usable - fixed_overhead) * 0.75  # 25% safety margin
+        # 5 tensors per step per env: states(f32), actions(f32), rewards(f32),
+        # + terminals(bool), truncates(bool)
+        bytes_per_step = (state_dim + action_dim + 3) * 4 + 2
         # Workers + learner both hold num_workers copies; evaluator holds 1 copy
         total_steps_per_env = 2 * _num_workers * train_max_step + test_max_step
         max_envs = max(1, int(buffer_budget // (total_steps_per_env * bytes_per_step)))
-        # Round down to nearest 256 for memory alignment
-        max_envs = max(256, (max_envs // 256) * 256)
+        # Round down to nearest 64 for GPU efficiency
+        if max_envs >= 64:
+            max_envs = (max_envs // 64) * 64
         if max_envs < num_envs:
             proj_gb = (fixed_overhead + max_envs * total_steps_per_env * bytes_per_step) / 1024**3
             print(f"  GPU scaling: num_envs {num_envs}→{max_envs} "
