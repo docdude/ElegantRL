@@ -78,16 +78,16 @@ GPU_ID = 0
 DEFAULT_ERL_PARAMS = {
     "net_dims": [128, 64],
     "learning_rate": 1e-4,
-    "batch_size": 256,
+    "batch_size": 512,
     "break_step": 2_000_000,
     "gamma": 0.99,
     "lambda_entropy": 0.02,
     "clip_grad_norm": 3.0,
-    "repeat_times": 16.0,
+    "repeat_times": 4.0,
     "ratio_clip": 0.25,
     "lambda_gae_adv": 0.95,
     "if_use_v_trace": True,
-    "eval_per_step": 5_000,
+    "eval_per_step": 50_000,
     "eval_times": 32,
 }
 
