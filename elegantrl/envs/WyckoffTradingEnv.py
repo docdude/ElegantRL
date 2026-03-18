@@ -266,8 +266,18 @@ class WyckoffTradingVecEnv:
     """
     GPU-vectorized Wyckoff trading env for parallel episode rollouts.
 
-    Mirrors StockTradingVecEnv pattern: all state is PyTorch tensors on GPU,
-    num_envs episodes run in parallel via batched tensor operations.
+    All state is PyTorch tensors on GPU, num_envs episodes run in parallel
+    via batched tensor operations with per-env day tracking.
+
+    When episode_len is set (training mode):
+      - Each env runs sub-episodes of episode_len bars
+      - Starting positions are staggered randomly across the data
+      - Per-env auto-reset on done for desynchronized terminal signals
+      - This enables PPO to get frequent done signals within each horizon
+
+    When episode_len is None (eval mode):
+      - All envs walk through data from start to end (synchronized)
+      - Compatible with ElegantRL evaluator expectations
 
     Position: -1 (short), 0 (flat), +1 (long)
     Action: continuous [-1, 1] → discretized via ±0.33 threshold
@@ -286,6 +296,7 @@ class WyckoffTradingVecEnv:
         num_envs: int = 256,
         gpu_id: int = 0,
         npz_path: str = None,
+        episode_len: int = None,
         **kwargs,
     ):
         self.device = th.device(
@@ -311,17 +322,6 @@ class WyckoffTradingVecEnv:
         # Differential Sharpe EMA decay
         self._eta = 0.005
 
-        # State tracking (set in reset)
-        self.day = None
-        self.position = None      # (num_envs,) int: -1, 0, +1
-        self.entry_price = None   # (num_envs,)
-        self.cash = None          # (num_envs,) accumulated PnL
-        self.total_asset = None   # (num_envs,)
-        self._A = None            # (num_envs,) EMA of returns
-        self._B = None            # (num_envs,) EMA of squared returns
-        self.rewards = None
-        self.cumulative_returns = None
-
         # Env metadata
         n_features = self.tech_factor.shape[1]
         self.env_name = 'WyckoffTradingVecEnv-v1'
@@ -331,6 +331,23 @@ class WyckoffTradingVecEnv:
         self.action_dim = 1
         self.if_discrete = False
         self.target_return = +np.inf
+
+        # Sub-episode config: stagger when episode_len is shorter than full data
+        self._stagger = episode_len is not None and episode_len < self.max_step
+        self._episode_len = episode_len if self._stagger else self.max_step
+
+        # State tracking (set in reset)
+        self.day = None           # (num_envs,) long — per-env position in data
+        self.step_count = None    # (num_envs,) long — steps within current sub-episode
+        self.position = None      # (num_envs,) int: -1, 0, +1
+        self.entry_price = None   # (num_envs,)
+        self.cash = None          # (num_envs,) accumulated PnL
+        self.total_asset = None   # (num_envs,)
+        self._A = None            # (num_envs,) EMA of returns
+        self._B = None            # (num_envs,) EMA of squared returns
+        self.reward_sum = None    # (num_envs,) per-episode reward accumulator
+        self.reward_count = None  # (num_envs,) per-episode step counter
+        self.cumulative_returns = None
 
     def _load_data(self, npz_path: str):
         if npz_path is None or not os.path.exists(npz_path):
@@ -343,7 +360,6 @@ class WyckoffTradingVecEnv:
         return close_ary, tech_ary
 
     def reset(self):
-        self.day = 0
         ne = self.num_envs
         dev = self.device
 
@@ -353,10 +369,23 @@ class WyckoffTradingVecEnv:
         self.total_asset = th.full((ne,), self.initial_amount, dtype=th.float32, device=dev)
         self._A = th.zeros(ne, dtype=th.float32, device=dev)
         self._B = th.zeros(ne, dtype=th.float32, device=dev)
-        self.rewards = []
+        self.reward_sum = th.zeros(ne, dtype=th.float32, device=dev)
+        self.reward_count = th.zeros(ne, dtype=th.long, device=dev)
+        self.cumulative_returns = [0.0] * ne
+
+        if self._stagger:
+            # Random starting positions, leave room for at least one episode
+            max_start = max(1, self.max_step - self._episode_len)
+            self.day = th.randint(0, max_start, (ne,), dtype=th.long, device=dev)
+            # Random intra-episode offset → desynchronizes dones across envs
+            offset = th.randint(0, self._episode_len, (ne,), dtype=th.long, device=dev)
+            self.step_count = offset
+            self.day = th.clamp(self.day + offset, max=self.max_step)
+        else:
+            self.day = th.zeros(ne, dtype=th.long, device=dev)
+            self.step_count = th.zeros(ne, dtype=th.long, device=dev)
 
         if self.if_random_reset:
-            # Slight randomization of starting cash for diversity
             rand_factor = th.rand(ne, dtype=th.float32, device=dev) * 0.1 + 0.95
             self.total_asset = self.total_asset * rand_factor
             self.cash = self.total_asset - self.initial_amount
@@ -365,29 +394,24 @@ class WyckoffTradingVecEnv:
 
     def get_state(self):
         """Return (num_envs, state_dim) tensor."""
-        price = self.close_price[self.day]  # scalar
+        price = self.close_price[self.day]           # (num_envs,) per-env price
         pos_f = self.position.float()
-
-        # Unrealized PnL: position * (current_price - entry_price)
         unrealized = pos_f * (price - self.entry_price)
 
-        # State: [position, tanh(unrealized_pnl_norm), tanh(cash_norm), tech_features...]
         state = th.zeros(self.num_envs, self.state_dim, dtype=th.float32, device=self.device)
         state[:, 0] = pos_f
         state[:, 1] = th.tanh(unrealized / self.initial_amount)
         state[:, 2] = th.tanh(self.cash / self.initial_amount)
-        state[:, 3:] = self.tech_factor[self.day].unsqueeze(0).expand(self.num_envs, -1)
+        state[:, 3:] = self.tech_factor[self.day]    # (num_envs, n_features)
         return state
 
     def step(self, action):
         """
-        Vectorized step: action shape (num_envs, 1) or (num_envs,).
+        Vectorized step with per-env day tracking and auto-reset.
 
         Returns: state (num_envs, state_dim), reward (num_envs,),
-                 done (num_envs,), truncate (num_envs,), info dict
+                 done (num_envs, bool), truncate (num_envs, bool), info dict
         """
-        import torch as th
-
         # Decode action → target position {-1, 0, +1}
         if action.dim() == 2:
             action = action[:, 0]
@@ -395,9 +419,10 @@ class WyckoffTradingVecEnv:
         target_pos[action > 0.33] = 1
         target_pos[action < -0.33] = -1
 
-        prev_price = self.close_price[self.day]
-        self.day += 1
-        curr_price = self.close_price[self.day]
+        prev_price = self.close_price[self.day]                 # (num_envs,)
+        self.day = th.clamp(self.day + 1, max=self.max_step)
+        self.step_count += 1
+        curr_price = self.close_price[self.day]                 # (num_envs,)
 
         old_pos = self.position
         pos_changed = target_pos != old_pos
@@ -406,13 +431,13 @@ class WyckoffTradingVecEnv:
         # Close existing position where changed and had a position
         had_pos = pos_changed & (old_pos != 0)
         if had_pos.any():
-            pnl = pos_f[had_pos] * (curr_price - self.entry_price[had_pos])
+            pnl = pos_f[had_pos] * (curr_price[had_pos] - self.entry_price[had_pos])
             self.cash[had_pos] += pnl - self.cost_per_trade
 
         # Open new position where changed and target != 0
         opening = pos_changed & (target_pos != 0)
         if opening.any():
-            self.entry_price[opening] = curr_price
+            self.entry_price[opening] = curr_price[opening]
             self.cash[opening] -= self.cost_per_trade
 
         # Clear entry price for flat positions
@@ -425,38 +450,66 @@ class WyckoffTradingVecEnv:
         # Portfolio value
         new_pos_f = target_pos.float()
         unrealized = new_pos_f * (curr_price - self.entry_price)
-        # Zero unrealized for flat positions (entry_price=0 but be safe)
         unrealized[target_pos == 0] = 0.0
         new_total = self.initial_amount + self.cash + unrealized
         prev_total = self.total_asset
 
         # Compute reward (vectorized)
         reward = self._compute_reward(new_total, prev_total, curr_price, prev_price)
-
-        self.rewards.append(reward)
+        self.reward_sum += reward
+        self.reward_count += 1
         self.total_asset = new_total
 
-        # Terminal
-        done = self.day == self.max_step
-        if done:
-            # Force close all positions
-            has_pos = self.position != 0
+        # Per-env done: sub-episode finished OR hit end of data
+        done = (self.step_count >= self._episode_len) | (self.day >= self.max_step)
+
+        if done.any():
+            # Force close positions for done envs
+            has_pos = done & (self.position != 0)
             if has_pos.any():
-                pos_f = self.position[has_pos].float()
-                pnl = pos_f * (curr_price - self.entry_price[has_pos])
+                pf = self.position[has_pos].float()
+                pnl = pf * (curr_price[has_pos] - self.entry_price[has_pos])
                 self.cash[has_pos] += pnl - self.cost_per_trade
                 self.position[has_pos] = 0
                 self.entry_price[has_pos] = 0.0
-                self.total_asset = self.initial_amount + self.cash
+                self.total_asset[has_pos] = self.initial_amount + self.cash[has_pos]
 
-            mean_reward = th.stack(self.rewards).mean(dim=0)
-            reward = reward + mean_reward * (1.0 / (1.0 - self.gamma))
-            self.cumulative_returns = (self.total_asset / self.initial_amount * 100).cpu().tolist()
+            # Terminal reward bonus: mean_reward / (1 - gamma)
+            mean_r = self.reward_sum[done] / th.clamp(self.reward_count[done].float(), min=1)
+            reward[done] = reward[done] + mean_r / (1.0 - self.gamma)
 
-        state = self.reset()[0] if done else self.get_state()
-        done_t = th.tensor(done, dtype=th.bool, device=self.device).expand(self.num_envs)
-        truncate_t = th.zeros(self.num_envs, dtype=th.bool, device=self.device)
-        return state, reward, done_t, truncate_t, {}
+            # Save cumulative returns (list for evaluator compatibility)
+            done_returns = (self.total_asset[done] / self.initial_amount * 100)
+            for i, idx in enumerate(th.where(done)[0]):
+                self.cumulative_returns[idx.item()] = done_returns[i].item()
+
+            # Auto-reset only the done envs
+            self._auto_reset(done)
+
+        state = self.get_state()
+        truncate = th.zeros(self.num_envs, dtype=th.bool, device=self.device)
+        return state, reward, done, truncate, {}
+
+    def _auto_reset(self, mask):
+        """Reset only the envs indicated by mask to new random starting positions."""
+        n_reset = mask.sum().item()
+
+        if self._stagger:
+            max_start = max(1, self.max_step - self._episode_len)
+            new_starts = th.randint(0, max_start, (n_reset,), dtype=th.long, device=self.device)
+            self.day[mask] = new_starts
+        else:
+            self.day[mask] = 0
+
+        self.step_count[mask] = 0
+        self.position[mask] = 0
+        self.entry_price[mask] = 0.0
+        self.cash[mask] = 0.0
+        self.total_asset[mask] = self.initial_amount
+        self._A[mask] = 0.0
+        self._B[mask] = 0.0
+        self.reward_sum[mask] = 0.0
+        self.reward_count[mask] = 0
 
     def _compute_reward(self, new_total, prev_total, curr_price, prev_price):
         """Vectorized reward computation. Returns (num_envs,) tensor."""

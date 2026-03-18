@@ -63,6 +63,7 @@ DEFAULT_ENV_PARAMS = {
     "reward_mode": "pnl",           # "pnl", "log_ret", "sharpe", "sortino"
     "reward_scale": 1.0,
     "num_envs": 256,                # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
+    "episode_len": 4096,            # sub-episode length for PPO (None = full data)
 }
 
 

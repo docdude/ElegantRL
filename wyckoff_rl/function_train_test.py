@@ -147,6 +147,7 @@ def train_split(
     test_max_step = n_test - 1
 
     num_envs = env_params.get('num_envs', 256)
+    episode_len = env_params.get('episode_len', 4096)
 
     # ── 2. Build Config ──────────────────────────────────────────────────
     agent_class = get_agent_class(model_name)
@@ -173,7 +174,9 @@ def train_split(
         # + terminals(bool), truncates(bool)
         bytes_per_step = (state_dim + action_dim + 3) * 4 + 2
         # Workers + learner both hold num_workers copies; evaluator holds 1 copy
-        total_steps_per_env = 2 * _num_workers * train_max_step + test_max_step
+        # PPO buffer is horizon_len (=episode_len), not full train_max_step
+        eff_horizon = episode_len if episode_len < train_max_step else train_max_step
+        total_steps_per_env = 2 * _num_workers * eff_horizon + test_max_step
         max_envs = max(1, int(buffer_budget // (total_steps_per_env * bytes_per_step)))
         # Round down to nearest 64 for GPU efficiency
         if max_envs >= 64:
@@ -182,7 +185,7 @@ def train_split(
             proj_gb = (fixed_overhead + max_envs * total_steps_per_env * bytes_per_step) / 1024**3
             print(f"  GPU scaling: num_envs {num_envs}→{max_envs} "
                   f"(GPU={gpu_total / 1024**3:.1f} GiB, free={gpu_free / 1024**3:.1f} GiB, "
-                  f"used={gpu_used / 1024**2:.0f} MiB, horizon={train_max_step}, "
+                  f"used={gpu_used / 1024**2:.0f} MiB, horizon={eff_horizon}, "
                   f"workers={_num_workers}, proj={proj_gb:.1f} GiB)")
             num_envs = max_envs
 
@@ -207,6 +210,7 @@ def train_split(
         'reward_mode': env_params.get('reward_mode', 'pnl'),
         'reward_scale': env_params.get('reward_scale', 1.0),
         'gpu_id': gpu_id,
+        'episode_len': episode_len,
     }
 
     eval_env_args = env_args.copy()
@@ -214,6 +218,7 @@ def train_split(
         'max_step': test_max_step,
         'end_idx': n_test,
         'npz_path': test_npz,
+        'episode_len': None,  # eval walks full test data, no sub-episodes
     })
 
     args = Config(agent_class, WyckoffTradingVecEnv, env_args)
@@ -231,8 +236,8 @@ def train_split(
     args.eval_times = erl_params['eval_times']
 
     if not is_off_policy:
-        # PPO
-        args.horizon_len = train_max_step
+        # PPO — use episode_len for fast iterations (sub-episodes w/ auto-reset)
+        args.horizon_len = episode_len
         args.repeat_times = erl_params['repeat_times']
         args.lambda_entropy = erl_params['lambda_entropy']
         args.ratio_clip = erl_params['ratio_clip']
