@@ -1073,7 +1073,7 @@ def evaluate_feature_importance(
             valid = (target != 0) & ~np.isnan(target)
             labels = ((target[valid] + 1) / 2).astype(int)  # 0 or 1
             mda_df = compute_feature_importance_mda(
-                tech_ary[valid], labels, feature_names
+                tech_ary[valid].copy(), labels.copy(), feature_names
             )
             results["mda"] = mda_df
         except Exception as e:
@@ -1091,8 +1091,8 @@ def evaluate_feature_importance(
             valid = (target != 0) & ~np.isnan(target)
             labels = ((target[valid] + 1) / 2).astype(int)
 
-            X = pd.DataFrame(tech_ary[valid], columns=feature_names)
-            y = pd.Series(labels)
+            X = pd.DataFrame(tech_ary[valid].copy(), columns=feature_names)
+            y = pd.Series(labels.copy())
 
             clf = RandomForestClassifier(
                 n_estimators=100, max_features=1,
