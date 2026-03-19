@@ -1068,8 +1068,6 @@ def evaluate_feature_importance(
         try:
             from sklearn.ensemble import RandomForestClassifier
             from sklearn.inspection import permutation_importance
-            from sklearn.model_selection import cross_val_score
-            import pandas as pd
 
             target = np.sign(fwd["fwd_5bar"])
             valid = (target != 0) & ~np.isnan(target)
