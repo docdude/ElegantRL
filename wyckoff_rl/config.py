@@ -16,8 +16,10 @@ import operator as op
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "wyckoff_rl", "data")
 
-# Default NPZ — z-score + tanh normalized features
-WYCKOFF_NPZ_PATH = os.path.join(DATA_DIR, "wyckoff_nq_normalized.npz")
+# Default NPZ — z-score + tanh normalized features (40pt range bars)
+WYCKOFF_NPZ_PATH = os.path.join(
+    PROJECT_ROOT, "wyckoff_effort", "pipeline_output", "wyckoff_nq_40pt.npz"
+)
 
 # Results
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "wyckoff_effort", "rl_results")
@@ -30,7 +32,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 N_GROUPS = 5
 K_TEST_GROUPS = 2
-EMBARGO_BARS = 500        # in range bars (~500 bars ≈ a few sessions)
+EMBARGO_BARS = 100        # in range bars (reduced for 7.6K bar dataset; ~100 bars ≈ 1 session)
 
 def nCr(n, r):
     r = min(r, n - r)
@@ -61,9 +63,9 @@ DEFAULT_ENV_PARAMS = {
     "initial_amount": 1000.0,       # in NQ points
     "cost_per_trade": 0.5,          # points per side (covers commission + slippage)
     "reward_mode": "pnl",           # "pnl", "log_ret", "sharpe", "sortino"
-    "reward_scale": 2**5,           # 32; targets cumR ~256 per 4096-step episode (author convention)
+    "reward_scale": 2**8,           # 256; targets cumR std ~241 per 1024-step episode (author: keep near 256)
     "num_envs": 256,                # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
-    "episode_len": 4096,            # sub-episode length for PPO (None = full data)
+    "episode_len": 1024,            # sub-episode length for PPO (~7 sub-episodes in 7.6K bars)
 }
 
 
