@@ -1,11 +1,9 @@
 """
 Phase 2: Feature Selection & Denoising
 
-Uses RiskLabAI for:
-    - Marcenko-Pastur covariance denoising (RMT)
-    - PCA orthogonalization with variance threshold
-    - MDI / MDA feature importance ranking
-    - Clustered feature importance
+    - Marcenko-Pastur covariance denoising (RMT) via numpy eigendecomposition
+    - PCA orthogonalization via sklearn
+    - MDI / MDA feature importance via sklearn
 
 Input: tech_ary from Phase 1
 Output: denoised/selected tech_ary, feature importance rankings
@@ -35,23 +33,19 @@ def denoise_features(
     """
     Denoise the feature covariance matrix using Random Matrix Theory.
 
-    Fits the Marcenko-Pastur distribution to identify noise eigenvalues,
-    then reconstructs the covariance matrix using only signal components.
+    Uses Marcenko-Pastur upper bound to identify noise eigenvalues,
+    then shrinks them to their mean (constant residual eigenvalue).
 
     Parameters
     ----------
     tech_ary : np.ndarray, shape (n_bars, n_features)
     bandwidth : float
-        KDE bandwidth for Marcenko-Pastur fitting.
+        Unused (kept for API compatibility). MP bound is analytic.
 
     Returns
     -------
     denoised_cov : np.ndarray, shape (n_features, n_features)
     """
-    from RiskLabAI.data.denoise.denoising import denoise_cov
-
-    bandwidth = bandwidth or FEATURE_SELECTION_DEFAULTS["kde_bandwidth"]
-
     n_bars, n_features = tech_ary.shape
     q = n_bars / n_features
 
@@ -62,11 +56,31 @@ def denoise_features(
     standardized = (tech_ary - means) / stds
 
     cov_raw = np.cov(standardized, rowvar=False)
-    cov_denoised = denoise_cov(cov_raw, q=q, bandwidth=bandwidth)
 
+    # Eigendecompose
+    eigenvalues, eigenvectors = np.linalg.eigh(cov_raw)
+    # Sort descending
+    idx = eigenvalues.argsort()[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+
+    # Marcenko-Pastur upper bound: λ+ = σ²(1 + 1/√q)²
+    sigma2 = 1.0  # standardized data
+    lambda_plus = sigma2 * (1 + 1.0 / np.sqrt(q)) ** 2
+
+    # Shrink noise eigenvalues (below MP bound) to their average
+    noise_mask = eigenvalues < lambda_plus
+    if noise_mask.any():
+        noise_mean = eigenvalues[noise_mask].mean()
+        eigenvalues[noise_mask] = noise_mean
+
+    # Reconstruct
+    cov_denoised = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+
+    n_signal = (~noise_mask).sum()
     logger.info(
         f"Denoised covariance: {n_features}×{n_features}, "
-        f"q={q:.1f}, bandwidth={bandwidth}"
+        f"q={q:.1f}, λ+={lambda_plus:.3f}, {n_signal} signal eigenvalues"
     )
     return cov_denoised
 
@@ -95,21 +109,24 @@ def pca_features(
     orthogonal_ary : np.ndarray, shape (n_bars, n_components)
     eigen_info : pd.DataFrame with eigenvalues and cumulative variance
     """
-    from RiskLabAI.features.feature_importance.orthogonal_features import (
-        orthogonal_features,
-    )
+    from sklearn.decomposition import PCA
 
     variance_threshold = variance_threshold or FEATURE_SELECTION_DEFAULTS["variance_threshold"]
-    feature_names = feature_names or WYCKOFF_FEATURE_COLUMNS
 
-    df = pd.DataFrame(tech_ary, columns=feature_names[:tech_ary.shape[1]])
-    ortho_df, eigen_df = orthogonal_features(df, variance_threshold=variance_threshold)
+    pca = PCA(n_components=variance_threshold, svd_solver="full")
+    orthogonal = pca.fit_transform(tech_ary).astype(np.float32)
+
+    eigen_info = pd.DataFrame({
+        "eigenvalue": pca.explained_variance_,
+        "variance_ratio": pca.explained_variance_ratio_,
+        "cumulative_variance": np.cumsum(pca.explained_variance_ratio_),
+    })
 
     logger.info(
-        f"PCA: {tech_ary.shape[1]} features → {ortho_df.shape[1]} components "
+        f"PCA: {tech_ary.shape[1]} features → {orthogonal.shape[1]} components "
         f"({variance_threshold*100:.0f}% variance)"
     )
-    return ortho_df.values.astype(np.float32), eigen_df
+    return orthogonal, eigen_info
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,13 +157,9 @@ def compute_feature_importance_mdi(
     importance_df : pd.DataFrame with "Mean" and "StandardDeviation" columns
     """
     from sklearn.ensemble import RandomForestClassifier
-    from RiskLabAI.features.feature_importance.feature_importance_mdi import (
-        FeatureImportanceMDI,
-    )
 
-    feature_names = feature_names or WYCKOFF_FEATURE_COLUMNS
-    X = pd.DataFrame(tech_ary, columns=feature_names[:tech_ary.shape[1]])
-    y = pd.Series(labels)
+    feature_names = feature_names or [f"f{i}" for i in range(tech_ary.shape[1])]
+    names = feature_names[:tech_ary.shape[1]]
 
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
@@ -154,14 +167,17 @@ def compute_feature_importance_mdi(
         random_state=42,
         n_jobs=-1,
     )
-    strategy = FeatureImportanceMDI(clf)
-
-    kwargs = {}
+    fit_kwargs = {}
     if sample_weights is not None:
-        kwargs["sample_weight"] = sample_weights
+        fit_kwargs["sample_weight"] = sample_weights
+    clf.fit(tech_ary, labels, **fit_kwargs)
 
-    importance = strategy.compute(X, y, **kwargs)
-    importance = importance.sort_values("Mean", ascending=False)
+    # Per-tree importances for std
+    tree_importances = np.array([t.feature_importances_ for t in clf.estimators_])
+    importance = pd.DataFrame({
+        "Mean": tree_importances.mean(axis=0),
+        "StandardDeviation": tree_importances.std(axis=0),
+    }, index=names).sort_values("Mean", ascending=False)
 
     logger.info(f"MDI top 5: {importance.head().index.tolist()}")
     return importance
@@ -193,13 +209,10 @@ def compute_feature_importance_mda(
     importance_df : pd.DataFrame with "Mean" and "StandardDeviation" columns
     """
     from sklearn.ensemble import RandomForestClassifier
-    from RiskLabAI.features.feature_importance.feature_importance_mda import (
-        FeatureImportanceMDA,
-    )
+    from sklearn.inspection import permutation_importance
 
-    feature_names = feature_names or WYCKOFF_FEATURE_COLUMNS
-    X = pd.DataFrame(tech_ary, columns=feature_names[:tech_ary.shape[1]])
-    y = pd.Series(labels)
+    feature_names = feature_names or [f"f{i}" for i in range(tech_ary.shape[1])]
+    names = feature_names[:tech_ary.shape[1]]
 
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
@@ -207,15 +220,19 @@ def compute_feature_importance_mda(
         random_state=42,
         n_jobs=-1,
     )
-    strategy = FeatureImportanceMDA(clf, n_splits=n_splits)
-
-    kwargs = {}
+    fit_kwargs = {}
     if sample_weights is not None:
-        kwargs["train_sample_weights"] = sample_weights
-        kwargs["score_sample_weights"] = sample_weights
+        fit_kwargs["sample_weight"] = sample_weights
+    clf.fit(tech_ary, labels, **fit_kwargs)
 
-    importance = strategy.compute(X, y, **kwargs)
-    importance = importance.sort_values("Mean", ascending=False)
+    perm = permutation_importance(
+        clf, tech_ary, labels, n_repeats=n_splits,
+        random_state=42, n_jobs=-1,
+    )
+    importance = pd.DataFrame({
+        "Mean": perm.importances_mean,
+        "StandardDeviation": perm.importances_std,
+    }, index=names).sort_values("Mean", ascending=False)
 
     logger.info(f"MDA top 5: {importance.head().index.tolist()}")
     return importance
