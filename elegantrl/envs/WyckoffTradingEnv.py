@@ -209,7 +209,7 @@ class WyckoffTradingEnv:
 
             self.cumulative_returns = self.total_asset / self.initial_amount * 100
 
-        return self.get_state(), float(reward * self.reward_scale), terminal, False, {}
+        return self.get_state(), float(reward * self.reward_scale), False, terminal, {}
 
     def _compute_reward(
         self, new_total: float, prev_total: float,
@@ -478,8 +478,10 @@ class WyckoffTradingVecEnv:
             self._auto_reset(done)
 
         state = self.get_state()
-        truncate = th.zeros(self.num_envs, dtype=th.bool, device=self.device)
-        return state, reward, done, truncate, {}
+        # All episode endings are time-limited (not natural MDP termination).
+        # Return as truncation so GAE bootstraps V(s) instead of assuming V=0.
+        terminal = th.zeros(self.num_envs, dtype=th.bool, device=self.device)
+        return state, reward, terminal, done, {}
 
     def _auto_reset(self, mask):
         """Reset only the envs indicated by mask to new random starting positions."""
