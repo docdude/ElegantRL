@@ -243,6 +243,9 @@ def train_split(
         args.ratio_clip = erl_params['ratio_clip']
         args.lambda_gae_adv = erl_params['lambda_gae_adv']
         args.if_use_v_trace = erl_params.get('if_use_v_trace', True)
+        # Huber loss for critic: linear gradient for large errors, MSE for small
+        import torch as th
+        args.criterion = th.nn.SmoothL1Loss(reduction="none", beta=10.0)
     else:
         # SAC / TD3
         args.horizon_len = train_max_step // 4
