@@ -48,7 +48,7 @@ N_PATHS = N_SPLITS * K_TEST_GROUPS // N_GROUPS  # 10*2/5 = 4
 # Adaptive CPCV
 # ─────────────────────────────────────────────────────────────────────────────
 
-ADAPTIVE_FEATURE = "ER_Ratio"      # Wyckoff effort-result ratio (best: 34.5% improvement over std CPCV)
+ADAPTIVE_FEATURE = "er_ratio"       # Wyckoff effort-result ratio (new 58-feature pipeline naming)
 ADAPTIVE_SMOOTH_WINDOW = 50       # smoothing window for tech feature (bars)
 ADAPTIVE_N_SUBSPLITS = 3
 ADAPTIVE_LOWER_Q = 0.25
