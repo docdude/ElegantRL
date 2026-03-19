@@ -207,7 +207,6 @@ class WyckoffTradingEnv:
                 self.entry_price = 0.0
                 self.total_asset = self.initial_amount + self.cash
 
-            reward += 1 / (1 - self.gamma) * np.mean(self.rewards)
             self.cumulative_returns = self.total_asset / self.initial_amount * 100
 
         return self.get_state(), float(reward * self.reward_scale), terminal, False, {}
@@ -469,11 +468,6 @@ class WyckoffTradingVecEnv:
         self.position = th.where(done, th.zeros_like(self.position), self.position)
         self.entry_price = th.where(done, th.zeros_like(self.entry_price), self.entry_price)
         self.total_asset = th.where(done, self.initial_amount + self.cash, self.total_asset)
-
-        # Terminal reward bonus: mean_reward / (1 - gamma)
-        safe_count = th.clamp(self.reward_count.float(), min=1)
-        mean_r = self.reward_sum / safe_count
-        reward = reward + done_f * mean_r / (1.0 - self.gamma)
 
         # Save cumulative returns (list for evaluator compatibility)
         done_returns = (self.total_asset / self.initial_amount * 100)
