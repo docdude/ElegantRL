@@ -1066,16 +1066,32 @@ def evaluate_feature_importance(
     # ---- 2. MDA (permutation importance) ----
     if method in ("mda", "all"):
         try:
-            from .feature_selection import compute_feature_importance_mda
-            # Target: sign of 5-bar forward return
+            from sklearn.ensemble import RandomForestClassifier
+            from sklearn.inspection import permutation_importance
+            from sklearn.model_selection import cross_val_score
+            import pandas as pd
+
             target = np.sign(fwd["fwd_5bar"])
-            # Remove bars where fwd return is 0 or NaN
             valid = (target != 0) & ~np.isnan(target)
             labels = ((target[valid] + 1) / 2).astype(int)  # 0 or 1
-            mda_df = compute_feature_importance_mda(
-                tech_ary[valid].copy(), labels.copy(), feature_names
+            X = pd.DataFrame(tech_ary[valid].copy(), columns=feature_names)
+            y = labels.copy()
+
+            clf = RandomForestClassifier(
+                n_estimators=200, max_features=1,
+                random_state=42, n_jobs=-1,
             )
+            clf.fit(X, y)
+            perm = permutation_importance(
+                clf, X, y, n_repeats=10, random_state=42, n_jobs=-1,
+            )
+            mda_df = pd.DataFrame({
+                "Mean": perm.importances_mean,
+                "StandardDeviation": perm.importances_std,
+            }, index=feature_names)
+            mda_df = mda_df.sort_values("Mean", ascending=False)
             results["mda"] = mda_df
+            logger.info(f"MDA top 10:\n{mda_df['Mean'].head(10)}")
         except Exception as e:
             logger.warning(f"MDA failed: {e}")
 
@@ -1083,28 +1099,32 @@ def evaluate_feature_importance(
     if method in ("sfi", "all"):
         try:
             from sklearn.ensemble import RandomForestClassifier
-            from RiskLabAI.features.feature_importance.feature_importance_sfi import (
-                FeatureImportanceSFI,
-            )
+            from sklearn.model_selection import cross_val_score
 
             target = np.sign(fwd["fwd_5bar"])
             valid = (target != 0) & ~np.isnan(target)
             labels = ((target[valid] + 1) / 2).astype(int)
+            X_all = tech_ary[valid].copy()
+            y = labels.copy()
 
-            X = pd.DataFrame(tech_ary[valid].copy(), columns=feature_names)
-            y = pd.Series(labels.copy())
+            sfi_means, sfi_stds = [], []
+            for i in range(X_all.shape[1]):
+                Xi = X_all[:, i:i+1]
+                clf = RandomForestClassifier(
+                    n_estimators=100, max_features=1,
+                    random_state=42, n_jobs=-1,
+                )
+                scores = cross_val_score(clf, Xi, y, cv=5, scoring="accuracy")
+                sfi_means.append(scores.mean())
+                sfi_stds.append(scores.std())
 
-            clf = RandomForestClassifier(
-                n_estimators=100, max_features=1,
-                random_state=42, n_jobs=-1,
-            )
-            sfi = FeatureImportanceSFI(clf, n_splits=5, scoring="accuracy")
-            sfi_df = sfi.compute(X, y)
-            if "FeatureName" in sfi_df.columns:
-                sfi_df = sfi_df.set_index("FeatureName")
+            sfi_df = pd.DataFrame({
+                "Mean": sfi_means,
+                "StandardDeviation": sfi_stds,
+            }, index=feature_names)
             sfi_df = sfi_df.sort_values("Mean", ascending=False)
             results["sfi"] = sfi_df
-            logger.info(f"SFI top 10:\n{sfi_df.head(10)}")
+            logger.info(f"SFI top 10:\n{sfi_df['Mean'].head(10)}")
         except Exception as e:
             logger.warning(f"SFI failed: {e}")
 
