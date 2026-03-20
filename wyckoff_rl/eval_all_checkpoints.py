@@ -218,20 +218,22 @@ def evaluate_single_checkpoint(
 
     account_values = np.array(account_values)
 
-    # Metrics
+    # Metrics — use log returns so Sharpe sign always matches cumulative return
     daily_returns = np.diff(account_values) / (account_values[:-1] + 1e-12)
     final_return = (account_values[-1] / initial_amount - 1)
     max_dd = _max_drawdown(account_values)
 
-    mean_r = daily_returns.mean()
-    std_r = daily_returns.std()
-    sharpe = mean_r / std_r * np.sqrt(252 * 6.5 * 60) if std_r > 1e-12 else 0.0
+    # Log returns for Sharpe/Sortino (geometric, sign-consistent with final return)
+    clipped = np.clip(account_values, 1e-12, None)
+    log_returns = np.diff(np.log(clipped))
+    mean_r = log_returns.mean()
+    std_r = log_returns.std()
     # Approximate annualization: range bars ≈ 1 per ~2min, so ~195 bars/hour
     # 252 days × 6.5 hours × 195 bars ≈ 320K bars/year
-    ann_factor = np.sqrt(min(len(daily_returns), 320_000))
+    ann_factor = np.sqrt(min(len(log_returns), 320_000))
     sharpe_simple = mean_r / std_r * ann_factor if std_r > 1e-12 else 0.0
 
-    neg_r = daily_returns[daily_returns < 0]
+    neg_r = log_returns[log_returns < 0]
     downside_std = np.sqrt(np.mean(neg_r ** 2)) if len(neg_r) > 0 else 1e-12
     sortino = mean_r / downside_std * ann_factor
 
@@ -388,7 +390,7 @@ def evaluate_split(
         return None
 
     df = pd.DataFrame(rows)
-    df = df.sort_values(['sharpe', 'final_return'], ascending=[False, False])
+    df = df.sort_values(['final_return', 'sharpe'], ascending=[False, False])
     df.to_csv(csv_path, index=False)
     print(f"\n    Saved: {csv_path}")
 
