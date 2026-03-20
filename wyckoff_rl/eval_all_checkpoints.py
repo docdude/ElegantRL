@@ -447,12 +447,14 @@ def _plot_split_comparison(
         'Oracle':   {'color': '#27ae60', 'linestyle': '--', 'linewidth': 1.2, 'alpha': 0.5},
     }
 
-    # Panel 1: All equity curves + baselines
+    # Panel 1: All equity curves + baselines (Oracle on right axis)
     ax = axes[0, 0]
     for name, curve in all_curves.items():
         ax.plot(curve, alpha=0.15, linewidth=0.5, color='steelblue')
     if baselines:
         for bname, bdata in baselines.items():
+            if bname == 'Oracle':
+                continue  # plotted on secondary axis below
             style = baseline_styles.get(bname, {'color': 'grey', 'linestyle': '--'})
             ax.plot(bdata['values'], **style,
                     label=f'{bname} ({bdata["return_pct"]:+.1f}%)')
@@ -465,6 +467,16 @@ def _plot_split_comparison(
             ax.plot(all_curves[name], color=color, linewidth=1.5, alpha=0.9,
                     label=f"{name} (Sharpe={row['sharpe']:.2f})")
     ax.axhline(initial_amount, color='grey', linestyle=':', alpha=0.3)
+    # Oracle on secondary y-axis
+    if baselines and 'Oracle' in baselines:
+        ax2 = ax.twinx()
+        oracle = baselines['Oracle']
+        style = baseline_styles['Oracle']
+        ax2.plot(oracle['values'], **style,
+                 label=f'Oracle ({oracle["return_pct"]:+.0f}%) [right axis]')
+        ax2.set_ylabel('Oracle Value', color='#27ae60', fontsize=8)
+        ax2.tick_params(axis='y', labelcolor='#27ae60', labelsize=7)
+        ax2.legend(fontsize=6, loc='upper right')
     ax.set_title(f'{split_name}: All Checkpoints ({len(all_curves)} total)')
     ax.set_xlabel('Bar')
     ax.set_ylabel('Portfolio Value (NQ points)')
