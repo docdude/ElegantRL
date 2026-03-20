@@ -88,6 +88,81 @@ def compute_nq_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
     return {'values': bh_values, 'return_pct': bh_return}
 
 
+def compute_sma_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
+                         initial_amount: float, cost_per_trade: float = 0.5,
+                         fast: int = 20, slow: int = 50) -> dict:
+    """SMA crossover trend-following baseline.
+
+    Long when fast SMA > slow SMA, short when fast < slow.
+    Uses full close_ary for lookback but only scores test_indices.
+    """
+    prices = close_ary.ravel()
+    fast_sma = np.convolve(prices, np.ones(fast) / fast, mode='same')
+    slow_sma = np.convolve(prices, np.ones(slow) / slow, mode='same')
+
+    # Position: +1 (long) or -1 (short)
+    signal = np.where(fast_sma > slow_sma, 1.0, -1.0)
+    signal[:slow] = 0.0  # no signal before enough lookback
+
+    test_prices = prices[test_indices]
+    test_signal = signal[test_indices]
+    returns = np.diff(test_prices) / test_prices[:-1]
+    # Signal from previous bar determines current bar's return
+    pos_returns = test_signal[:-1] * returns
+
+    # Subtract transaction costs on position changes
+    trades = np.abs(np.diff(test_signal))
+    cost_per_point = cost_per_trade / test_prices[1:]
+    pos_returns -= trades * cost_per_point
+
+    values = initial_amount * np.cumprod(np.concatenate([[1.0], 1.0 + pos_returns]))
+    ret_pct = (values[-1] / initial_amount - 1) * 100
+    return {'values': values, 'return_pct': ret_pct}
+
+
+def compute_random_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
+                            initial_amount: float, cost_per_trade: float = 0.5,
+                            n_trials: int = 100, seed: int = 42) -> dict:
+    """Average equity curve over N random {-1, 0, +1} position sequences."""
+    rng = np.random.RandomState(seed)
+    prices = close_ary.ravel()[test_indices]
+    returns = np.diff(prices) / prices[:-1]
+    n = len(returns)
+
+    cum_values = np.zeros(n + 1)
+    for _ in range(n_trials):
+        positions = rng.choice([-1, 0, 1], size=n)
+        pos_returns = positions * returns
+        trades = np.abs(np.diff(np.concatenate([[0], positions])))
+        cost_per_point = cost_per_trade / prices[1:]
+        pos_returns -= trades * cost_per_point
+        cum_values += initial_amount * np.cumprod(
+            np.concatenate([[1.0], 1.0 + pos_returns]))
+    cum_values /= n_trials
+
+    ret_pct = (cum_values[-1] / initial_amount - 1) * 100
+    return {'values': cum_values, 'return_pct': ret_pct}
+
+
+def compute_oracle_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
+                            initial_amount: float,
+                            cost_per_trade: float = 0.5) -> dict:
+    """Perfect-foresight oracle: always takes the optimal position."""
+    prices = close_ary.ravel()[test_indices]
+    returns = np.diff(prices) / prices[:-1]
+
+    # Oracle goes long if next return > 0, short if < 0, flat if ~0
+    oracle_pos = np.sign(returns)
+    pos_returns = oracle_pos * returns  # always positive
+    trades = np.abs(np.diff(np.concatenate([[0], oracle_pos])))
+    cost_per_point = cost_per_trade / prices[1:]
+    pos_returns -= trades * cost_per_point
+
+    values = initial_amount * np.cumprod(np.concatenate([[1.0], 1.0 + pos_returns]))
+    ret_pct = (values[-1] / initial_amount - 1) * 100
+    return {'values': values, 'return_pct': ret_pct}
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Single-checkpoint evaluation
 # ═══════════════════════════════════════════════════════════════════════════
@@ -239,12 +314,23 @@ def evaluate_split(
         print(f"  {split_name}: test NPZ not found at {test_npz}, skipping")
         return None
 
-    # Load test data for baseline
+    # Load test data for baselines
     test_data = np.load(test_npz)
     test_close = test_data['close_ary']
+    test_idx = np.arange(n_test)
+    cost = env_params.get('cost_per_trade', 0.5)
 
-    # Buy-and-hold baseline
-    baseline = compute_nq_baseline(test_close, np.arange(n_test), initial_amount)
+    # Compute all baselines
+    baseline = compute_nq_baseline(test_close, test_idx, initial_amount)
+    sma_baseline = compute_sma_baseline(test_close, test_idx, initial_amount, cost)
+    random_baseline = compute_random_baseline(test_close, test_idx, initial_amount, cost)
+    oracle_baseline = compute_oracle_baseline(test_close, test_idx, initial_amount, cost)
+    baselines = {
+        'B&H': baseline,
+        'SMA 20/50': sma_baseline,
+        'Random': random_baseline,
+        'Oracle': oracle_baseline,
+    }
 
     # Discover checkpoints
     checkpoints = discover_checkpoints(split_dir)
@@ -255,7 +341,10 @@ def evaluate_split(
     device = f'cuda:{gpu_id}' if gpu_id >= 0 and th.cuda.is_available() else 'cpu'
 
     print(f"\n  {split_name}: {len(checkpoints)} checkpoints, "
-          f"test={n_test:,} bars, B&H={baseline['return_pct']:+.2f}%")
+          f"test={n_test:,} bars, B&H={baseline['return_pct']:+.2f}%, "
+          f"SMA={sma_baseline['return_pct']:+.2f}%, "
+          f"Random={random_baseline['return_pct']:+.2f}%, "
+          f"Oracle={oracle_baseline['return_pct']:+.2f}%")
 
     # Evaluate each checkpoint
     rows = []
@@ -325,8 +414,7 @@ def evaluate_split(
     # Plot
     _plot_split_comparison(
         df, all_curves, split_dir, initial_amount, top_k,
-        baseline_values=baseline['values'],
-        baseline_return=baseline['return_pct'],
+        baselines=baselines,
     )
 
     return df
@@ -342,8 +430,7 @@ def _plot_split_comparison(
     split_dir: str,
     initial_amount: float,
     top_k: int,
-    baseline_values: np.ndarray = None,
-    baseline_return: float = None,
+    baselines: dict = None,
 ):
     """4-panel comparison plot."""
     import matplotlib
@@ -351,16 +438,24 @@ def _plot_split_comparison(
     import matplotlib.pyplot as plt
 
     split_name = os.path.basename(split_dir)
-    has_baseline = baseline_values is not None
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
-    # Panel 1: All equity curves + B&H baseline
+    baseline_styles = {
+        'B&H':      {'color': 'black',   'linestyle': '--', 'linewidth': 2},
+        'SMA 20/50': {'color': '#e67e22', 'linestyle': '-.', 'linewidth': 1.8},
+        'Random':   {'color': '#95a5a6', 'linestyle': ':',  'linewidth': 1.5},
+        'Oracle':   {'color': '#27ae60', 'linestyle': '--', 'linewidth': 1.2, 'alpha': 0.5},
+    }
+
+    # Panel 1: All equity curves + baselines
     ax = axes[0, 0]
     for name, curve in all_curves.items():
         ax.plot(curve, alpha=0.15, linewidth=0.5, color='steelblue')
-    if has_baseline:
-        ax.plot(baseline_values, color='black', linestyle='--',
-                linewidth=2, label=f'NQ B&H ({baseline_return:+.2f}%)')
+    if baselines:
+        for bname, bdata in baselines.items():
+            style = baseline_styles.get(bname, {'color': 'grey', 'linestyle': '--'})
+            ax.plot(bdata['values'], **style,
+                    label=f'{bname} ({bdata["return_pct"]:+.1f}%)')
     # Highlight top-k by Sharpe
     top_names = df.head(top_k)['checkpoint'].tolist()
     colors = plt.cm.Set1(np.linspace(0, 1, min(top_k, 9)))
@@ -375,7 +470,7 @@ def _plot_split_comparison(
     ax.set_ylabel('Portfolio Value (NQ points)')
     ax.legend(fontsize=6, loc='upper left')
 
-    # Panel 2: Return vs Step
+    # Panel 2: Return vs Step with baseline lines
     ax = axes[0, 1]
     ax.scatter(df['step'], df['final_return'], c=df['sharpe'], cmap='RdYlGn',
                s=30, alpha=0.7, edgecolors='grey', linewidths=0.5)
@@ -383,9 +478,14 @@ def _plot_split_comparison(
         row = df[df['checkpoint'] == name].iloc[0]
         ax.annotate(f"S={row['sharpe']:.1f}", (row['step'], row['final_return']),
                     fontsize=5, alpha=0.8)
-    if has_baseline:
-        ax.axhline(baseline_return, color='black', linestyle='--', linewidth=1,
-                    label=f'NQ B&H ({baseline_return:+.2f}%)')
+    if baselines:
+        for bname, bdata in baselines.items():
+            if bname == 'Oracle':
+                continue  # oracle return too large, distorts y-axis
+            style = baseline_styles.get(bname, {'color': 'grey', 'linestyle': '--'})
+            ax.axhline(bdata['return_pct'], linewidth=style.get('linewidth', 1),
+                       color=style['color'], linestyle=style['linestyle'],
+                       label=f'{bname} ({bdata["return_pct"]:+.1f}%)')
     ax.set_title('OOS Return vs Training Step')
     ax.set_xlabel('Step')
     ax.set_ylabel('Return (%)')
