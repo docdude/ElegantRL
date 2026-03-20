@@ -120,6 +120,8 @@ def parse_args():
                         default=DEFAULT_ERL_PARAMS['learning_rate'])
     parser.add_argument("--batch-size", type=int,
                         default=DEFAULT_ERL_PARAMS['batch_size'])
+    parser.add_argument("--continuous", action="store_true",
+                        help="Use continuous [-1,+1] position sizing instead of binary {-1,0,+1}")
 
     # Execution
     parser.add_argument("--split", type=int, default=None,
@@ -165,7 +167,8 @@ def main():
     print(f"{'='*60}")
     print(f"  Data: {args.npz}")
     print(f"  Bars: {total_bars:,}, Features: {n_features}")
-    print(f"  Model: {args.model.upper()}, Reward: {args.reward}")
+    sizing = "continuous [-1,+1]" if args.continuous else "binary {-1,0,+1}"
+    print(f"  Model: {args.model.upper()}, Reward: {args.reward}, Sizing: {sizing}")
     print(f"  CPCV: N={args.n_groups}, K={args.k_test}, "
           f"embargo={args.embargo} bars")
 
@@ -232,6 +235,7 @@ def main():
 
     env_params = DEFAULT_ENV_PARAMS.copy()
     env_params['reward_mode'] = args.reward
+    env_params['continuous_sizing'] = args.continuous
 
     # ── Output directory ─────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

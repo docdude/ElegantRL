@@ -71,6 +71,7 @@ DEFAULT_ENV_PARAMS = {
     "episode_len": 1024,            # sub-episode length for PPO (~7 sub-episodes in 7.6K bars)
     "window_size": WINDOW_SIZE,     # sliding window of bars for temporal context
     "feature_indices": SELECTED_INDICES,  # column indices into 58-feature tech_ary
+    "continuous_sizing": False,     # False={-1,0,+1} binary, True=[-1,+1] continuous
 }
 
 
