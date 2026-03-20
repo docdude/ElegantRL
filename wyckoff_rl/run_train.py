@@ -96,7 +96,7 @@ def parse_args():
         description="Wyckoff RL — Adaptive CPCV Training"
     )
     parser.add_argument("--model", type=str, default="ppo",
-                        choices=["ppo", "sac", "td3"])
+                        choices=["ppo", "wyckoff_ppo", "sac", "td3"])
     parser.add_argument("--reward", type=str, default=DEFAULT_ENV_PARAMS['reward_mode'],
                         choices=["pnl", "log_ret", "sharpe", "sortino"],
                         help="Reward function")
