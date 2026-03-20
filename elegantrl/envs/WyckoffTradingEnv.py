@@ -3,20 +3,31 @@ Single-instrument Wyckoff Range-Bar Trading Environment.
 
 Designed for NQ futures (or any single instrument) with Wyckoff features.
 Unlike StockTradingEnv (multi-stock portfolio), this env trades ONE asset
-with discrete position states: short (-1), flat (0), long (+1).
+with configurable position sizing.
+
+Position sizing modes (controlled by continuous_sizing parameter):
+    False (default) — Binary {-1, 0, +1} via ±0.33 thresholds
+        Models a 1-contract prop trader. Realistic for NQ futures.
+    True — Continuous [-1, +1] position sizing
+        Models a multi-contract trader who sizes in/out based on conviction.
 
 Data format (NPZ):
     close_ary : (n_bars, 1) — range-bar close prices
     tech_ary  : (n_bars, n_features) — Wyckoff feature matrix
 
 Action space: continuous [-1, 1]
-    Discretized to: -1 (short), 0 (flat), +1 (long)
-    Thresholds at ±0.33
+    Binary mode: discretized to {-1, 0, +1} via ±0.33 thresholds
+    Continuous mode: maps directly to position size
 
-State: [position, unrealized_pnl_norm, cash_norm, *tech_features]
+PnL model: mark-to-market each bar
+    step_pnl = position * (close[t] - close[t-1])
+    cost: binary mode — flat cost_per_trade per position change
+          continuous mode — cost proportional to |position_change|
+
+State: [position, last_step_pnl_norm, cash_norm, *tech_features]
 
 Reward: configurable via reward_mode parameter
-    "pnl"       — realized + unrealized PnL change (default)
+    "pnl"       — mark-to-market PnL change (default)
     "log_ret"   — log return of portfolio value
     "sharpe"    — differential Sharpe (Moody & Saffell 1998)
     "sortino"   — differential Sortino
@@ -71,6 +82,7 @@ class WyckoffTradingEnv:
         npz_path: str = None,
         window_size: int = 1,
         feature_indices: list = None,
+        continuous_sizing: bool = False,
         **kwargs,  # absorb extra kwargs from build_env
     ):
         self.npz_path = npz_path
@@ -95,15 +107,22 @@ class WyckoffTradingEnv:
         # Sliding window
         self.window_size = window_size
 
-        # Position tracking
-        self.position = 0        # -1, 0, +1
-        self.entry_price = 0.0
-        self.cash = 0.0          # accumulated PnL in points
+        # Position sizing mode
+        self.continuous_sizing = continuous_sizing
+
+        # Position tracking (continuous sizing)
+        self.position = 0.0      # float in [-1, +1]
+        self.cash = 0.0          # accumulated M2M PnL minus costs
+        self.last_step_pnl = 0.0 # PnL from last bar (for state)
         self.day = 0
         self.rewards = []
         self.total_asset = 0.0
         self.cumulative_returns = 0.0
         self.if_random_reset = False
+
+        # Trade tracking
+        self.total_trades = 0
+        self.total_turnover = 0.0  # sum of |position_change|
 
         # Differential Sharpe state
         self._A = 0.0  # EMA of returns
@@ -135,28 +154,22 @@ class WyckoffTradingEnv:
 
     def reset(self) -> Tuple[ARY, dict]:
         self.day = 0
-        self.position = 0
-        self.entry_price = 0.0
+        self.position = 0.0
         self.cash = 0.0
+        self.last_step_pnl = 0.0
         self.rewards = []
         self.total_asset = self.initial_amount
         self.cumulative_returns = 0.0
+        self.total_trades = 0
+        self.total_turnover = 0.0
         self._A = 0.0
         self._B = 0.0
         return self.get_state(), {}
 
     def get_state(self) -> ARY:
-        price = self.close_ary[self.day]
-
-        # Unrealized PnL normalized by initial capital
-        if self.position != 0:
-            unrealized = self.position * (price - self.entry_price)
-        else:
-            unrealized = 0.0
-
         agent_state = np.array([
-            float(self.position),
-            np.tanh(unrealized / self.initial_amount),
+            self.position,
+            np.tanh(self.last_step_pnl / self.initial_amount),
             np.tanh(self.cash / self.initial_amount),
         ], dtype=np.float32)
 
@@ -178,40 +191,48 @@ class WyckoffTradingEnv:
         return np.concatenate([agent_state, window_flat])
 
     def step(self, action) -> Tuple[ARY, float, bool, bool, dict]:
-        # Decode action: continuous [-1, 1] → discrete {-1, 0, +1}
         if isinstance(action, np.ndarray):
             action = action.item() if action.size == 1 else action[0]
-        if action > 0.33:
-            target_pos = 1
-        elif action < -0.33:
-            target_pos = -1
+
+        # Decode action based on sizing mode
+        if self.continuous_sizing:
+            target_pos = float(np.clip(action, -1.0, 1.0))
         else:
-            target_pos = 0
+            # Binary: discretize to {-1, 0, +1}
+            if action > 0.33:
+                target_pos = 1.0
+            elif action < -0.33:
+                target_pos = -1.0
+            else:
+                target_pos = 0.0
 
         prev_price = self.close_ary[self.day]
         self.day += 1
         curr_price = self.close_ary[self.day]
 
-        # Execute position change
+        # Mark-to-market: PnL from holding old position during this bar
         old_position = self.position
-        if target_pos != old_position:
-            # Close existing position
-            if old_position != 0:
-                pnl = old_position * (curr_price - self.entry_price)
-                self.cash += pnl - self.cost_per_trade
-            # Open new position
-            if target_pos != 0:
-                self.entry_price = curr_price
-                self.cash -= self.cost_per_trade
-            else:
-                self.entry_price = 0.0
-            self.position = target_pos
+        step_pnl = old_position * (curr_price - prev_price)
 
-        # Current portfolio value
-        unrealized = 0.0
-        if self.position != 0:
-            unrealized = self.position * (curr_price - self.entry_price)
-        new_total = self.initial_amount + self.cash + unrealized
+        # Transaction cost
+        pos_change = abs(target_pos - old_position)
+        if self.continuous_sizing:
+            cost = pos_change * self.cost_per_trade
+        else:
+            # Binary: flat cost per position change event
+            cost = self.cost_per_trade if pos_change > 1e-6 else 0.0
+
+        # Trade tracking
+        if pos_change > 1e-6:
+            self.total_trades += 1
+            self.total_turnover += pos_change
+
+        # Update accounting
+        self.cash += step_pnl - cost
+        self.position = target_pos
+        self.last_step_pnl = step_pnl
+
+        new_total = self.initial_amount + self.cash
         prev_total = self.total_asset
 
         # Compute reward
@@ -222,12 +243,15 @@ class WyckoffTradingEnv:
         # Terminal
         terminal = self.day == self.max_step
         if terminal:
-            # Force close any open position
-            if self.position != 0:
-                pnl = self.position * (curr_price - self.entry_price)
-                self.cash += pnl - self.cost_per_trade
-                self.position = 0
-                self.entry_price = 0.0
+            # Charge cost to flatten at episode end
+            if abs(self.position) > 1e-6:
+                if self.continuous_sizing:
+                    self.cash -= abs(self.position) * self.cost_per_trade
+                else:
+                    self.cash -= self.cost_per_trade
+                self.total_trades += 1
+                self.total_turnover += abs(self.position)
+                self.position = 0.0
                 self.total_asset = self.initial_amount + self.cash
 
             self.cumulative_returns = self.total_asset / self.initial_amount * 100
@@ -291,19 +315,21 @@ class WyckoffTradingVecEnv:
     All state is PyTorch tensors on GPU, num_envs episodes run in parallel
     via batched tensor operations with per-env day tracking.
 
+    Continuous position sizing: action [-1, +1] maps directly to position.
+    PnL is mark-to-market each bar: pnl = position * (close[t] - close[t-1]).
+    Transaction cost is proportional to position change.
+
     When episode_len is set (training mode):
       - Each env runs sub-episodes of episode_len bars
       - Starting positions are staggered randomly across the data
       - Per-env auto-reset on done for desynchronized terminal signals
-      - This enables PPO to get frequent done signals within each horizon
 
     When episode_len is None (eval mode):
       - All envs walk through data from start to end (synchronized)
-      - Compatible with ElegantRL evaluator expectations
 
-    Position: -1 (short), 0 (flat), +1 (long)
-    Action: continuous [-1, 1] → discretized via ±0.33 threshold
-    State: [position, unrealized_pnl_norm, cash_norm, *tech_features]
+    Position: float in [-1, +1] (continuous sizing)
+    Action: continuous [-1, 1] → position size directly
+    State: [position_size, last_step_pnl_norm, cash_norm, *tech_features]
     """
 
     def __init__(
@@ -321,11 +347,15 @@ class WyckoffTradingVecEnv:
         episode_len: int = None,
         window_size: int = 1,
         feature_indices: list = None,
+        continuous_sizing: bool = False,
         **kwargs,
     ):
         self.device = th.device(
             f"cuda:{gpu_id}" if (th.cuda.is_available() and gpu_id >= 0) else "cpu"
         )
+
+        # Position sizing mode
+        self.continuous_sizing = continuous_sizing
 
         # Load data to GPU
         close_ary, tech_ary = self._load_data(npz_path)
@@ -380,9 +410,9 @@ class WyckoffTradingVecEnv:
         # State tracking (set in reset)
         self.day = None           # (num_envs,) long — per-env position in data
         self.step_count = None    # (num_envs,) long — steps within current sub-episode
-        self.position = None      # (num_envs,) int: -1, 0, +1
-        self.entry_price = None   # (num_envs,)
-        self.cash = None          # (num_envs,) accumulated PnL
+        self.position = None      # (num_envs,) float: continuous in [-1, +1]
+        self.cash = None          # (num_envs,) accumulated M2M PnL minus costs
+        self.last_step_pnl = None # (num_envs,) PnL from last bar (for state)
         self.total_asset = None   # (num_envs,)
         self._A = None            # (num_envs,) EMA of returns
         self._B = None            # (num_envs,) EMA of squared returns
@@ -404,14 +434,16 @@ class WyckoffTradingVecEnv:
         ne = self.num_envs
         dev = self.device
 
-        self.position = th.zeros(ne, dtype=th.int32, device=dev)
-        self.entry_price = th.zeros(ne, dtype=th.float32, device=dev)
+        self.position = th.zeros(ne, dtype=th.float32, device=dev)
         self.cash = th.zeros(ne, dtype=th.float32, device=dev)
+        self.last_step_pnl = th.zeros(ne, dtype=th.float32, device=dev)
         self.total_asset = th.full((ne,), self.initial_amount, dtype=th.float32, device=dev)
         self._A = th.zeros(ne, dtype=th.float32, device=dev)
         self._B = th.zeros(ne, dtype=th.float32, device=dev)
         self.reward_sum = th.zeros(ne, dtype=th.float32, device=dev)
         self.reward_count = th.zeros(ne, dtype=th.long, device=dev)
+        self.total_trades = th.zeros(ne, dtype=th.long, device=dev)
+        self.total_turnover = th.zeros(ne, dtype=th.float32, device=dev)
         self.cumulative_returns = [0.0] * ne
 
         if self._stagger:
@@ -435,13 +467,9 @@ class WyckoffTradingVecEnv:
 
     def get_state(self):
         """Return (num_envs, state_dim) tensor with sliding window."""
-        price = self.close_price[self.day]           # (num_envs,) per-env price
-        pos_f = self.position.float().unsqueeze(1)   # (num_envs, 1)
-        unrealized = (pos_f * (price - self.entry_price).unsqueeze(1))
-
         agent_state = th.cat([
-            pos_f,
-            (unrealized / self.initial_amount).tanh(),
+            self.position.unsqueeze(1),
+            (self.last_step_pnl / self.initial_amount).tanh().unsqueeze(1),
             (self.cash / self.initial_amount).tanh().unsqueeze(1),
         ], dim=1)  # (num_envs, 3)
 
@@ -465,45 +493,48 @@ class WyckoffTradingVecEnv:
     def step(self, action):
         """
         Branchless vectorized step with per-env day tracking and auto-reset.
-        Uses th.where instead of if-branches to avoid GPU synchronization.
+        Supports both binary {-1,0,+1} and continuous [-1,+1] position sizing.
         """
-        # Decode action → target position {-1, 0, +1}
+        # Decode action based on sizing mode
         if action.dim() == 2:
             action = action[:, 0]
-        target_pos = th.zeros_like(action, dtype=th.int32)
-        target_pos[action > 0.33] = 1
-        target_pos[action < -0.33] = -1
+        if self.continuous_sizing:
+            target_pos = action.clamp(-1.0, 1.0)
+        else:
+            # Binary: discretize to {-1, 0, +1}
+            target_pos = th.zeros_like(action)
+            target_pos[action > 0.33] = 1.0
+            target_pos[action < -0.33] = -1.0
 
         prev_price = self.close_price[self.day]                 # (num_envs,)
         self.day = th.clamp(self.day + 1, max=self.max_step)
         self.step_count += 1
         curr_price = self.close_price[self.day]                 # (num_envs,)
 
+        # Mark-to-market: PnL from holding old position during this bar
         old_pos = self.position
-        pos_changed = (target_pos != old_pos)
-        pos_f = old_pos.float()
+        step_pnl = old_pos * (curr_price - prev_price)
 
-        # Branchless position close: PnL realized where position changed AND had position
-        had_pos = pos_changed & (old_pos != 0)
-        close_pnl = pos_f * (curr_price - self.entry_price) - self.cost_per_trade
-        self.cash = th.where(had_pos, self.cash + close_pnl, self.cash)
+        # Transaction cost
+        pos_change = (target_pos - old_pos).abs()
+        changed = pos_change > 1e-6
+        if self.continuous_sizing:
+            cost = pos_change * self.cost_per_trade
+        else:
+            # Binary: flat cost per position change event
+            cost = th.where(changed, th.full_like(pos_change, self.cost_per_trade),
+                           th.zeros_like(pos_change))
 
-        # Branchless position open: set entry price and deduct cost where opening new position
-        opening = pos_changed & (target_pos != 0)
-        self.entry_price = th.where(opening, curr_price, self.entry_price)
-        self.cash = th.where(opening, self.cash - self.cost_per_trade, self.cash)
+        # Trade tracking (accumulated per-env, reset on auto_reset)
+        self.total_trades += changed.long()
+        self.total_turnover += pos_change
 
-        # Branchless flat: clear entry price where going flat
-        going_flat = pos_changed & (target_pos == 0)
-        self.entry_price = th.where(going_flat, th.zeros_like(self.entry_price), self.entry_price)
-
+        # Update accounting
+        self.cash = self.cash + step_pnl - cost
         self.position = target_pos
+        self.last_step_pnl = step_pnl
 
-        # Portfolio value (branchless)
-        new_pos_f = target_pos.float()
-        unrealized = new_pos_f * (curr_price - self.entry_price)
-        unrealized = th.where(target_pos == 0, th.zeros_like(unrealized), unrealized)
-        new_total = self.initial_amount + self.cash + unrealized
+        new_total = self.initial_amount + self.cash
         prev_total = self.total_asset
 
         # Compute reward (vectorized)
@@ -514,14 +545,17 @@ class WyckoffTradingVecEnv:
 
         # Per-env done: sub-episode finished OR hit end of data
         done = (self.step_count >= self._episode_len) | (self.day >= self.max_step)
-        done_f = done.float()
 
-        # Branchless terminal handling: force-close positions for done envs
-        done_has_pos = done & (self.position != 0)
-        term_pnl = self.position.float() * (curr_price - self.entry_price) - self.cost_per_trade
-        self.cash = th.where(done_has_pos, self.cash + term_pnl, self.cash)
+        # Terminal: charge cost to flatten for done envs
+        done_has_pos = done & (self.position.abs() > 1e-6)
+        if self.continuous_sizing:
+            flatten_cost = self.position.abs() * self.cost_per_trade
+        else:
+            flatten_cost = th.where(done_has_pos,
+                                    th.full_like(self.position, self.cost_per_trade),
+                                    th.zeros_like(self.position))
+        self.cash = th.where(done_has_pos, self.cash - flatten_cost, self.cash)
         self.position = th.where(done, th.zeros_like(self.position), self.position)
-        self.entry_price = th.where(done, th.zeros_like(self.entry_price), self.entry_price)
         self.total_asset = th.where(done, self.initial_amount + self.cash, self.total_asset)
 
         # Save cumulative returns (list for evaluator compatibility)
@@ -550,14 +584,16 @@ class WyckoffTradingVecEnv:
             self.day[mask] = 0
 
         self.step_count[mask] = 0
-        self.position[mask] = 0
-        self.entry_price[mask] = 0.0
+        self.position[mask] = 0.0
         self.cash[mask] = 0.0
+        self.last_step_pnl[mask] = 0.0
         self.total_asset[mask] = self.initial_amount
         self._A[mask] = 0.0
         self._B[mask] = 0.0
         self.reward_sum[mask] = 0.0
         self.reward_count[mask] = 0
+        self.total_trades[mask] = 0
+        self.total_turnover[mask] = 0.0
 
     def _compute_reward(self, new_total, prev_total, curr_price, prev_price):
         """Vectorized reward computation. Returns (num_envs,) tensor."""
