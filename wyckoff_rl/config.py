@@ -79,7 +79,7 @@ DEFAULT_ENV_PARAMS = {
 # DRL Agent
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL_NAME = "wyckoff_ppo"
+DEFAULT_MODEL_NAME = "ppo"
 RANDOM_SEED = 42
 GPU_ID = 0
 
