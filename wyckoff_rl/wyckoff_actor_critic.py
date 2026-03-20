@@ -111,16 +111,29 @@ class ActorPPO_Wyckoff(nn.Module):
         return (state - self.state_avg) / (self.state_std + 1e-4)
 
     def _encode(self, state: TEN) -> TEN:
-        """Normalize state, split into agent_state + window, encode → MLP input."""
+        """Normalize state, split into agent_state + window, encode → MLP input.
+
+        Handles both 2D (batch, state_dim) and 3D (horizon, num_envs, state_dim)
+        inputs.  The latter occurs in AgentPPO.update_net when the critic is
+        called on slices of the 3D replay buffer.
+        """
+        leading = state.shape[:-1]  # () for 1D, (B,) for 2D, (H, E) for 3D
+        if state.dim() >= 3:
+            state = state.reshape(-1, state.shape[-1])  # flatten to (B*, state_dim)
+
         state = self.state_norm(state)
         if self.encoder is not None:
-            agent_state = state[:, :self.agent_state_dim]  # (batch, 3)
-            window_flat = state[:, self.agent_state_dim:]  # (batch, W*F)
-            window = window_flat.reshape(-1, self.window_size, self.n_features)  # (batch, W, F)
-            embedding = self.encoder(window)               # (batch, embed_dim)
-            return th.cat([agent_state, embedding], dim=1) # (batch, 3+embed_dim)
+            agent_state = state[:, :self.agent_state_dim]  # (B*, 3)
+            window_flat = state[:, self.agent_state_dim:]  # (B*, W*F)
+            window = window_flat.reshape(-1, self.window_size, self.n_features)
+            embedding = self.encoder(window)
+            mlp_input = th.cat([agent_state, embedding], dim=1)
         else:
-            return state
+            mlp_input = state
+
+        if len(leading) >= 2:  # restore 3-D shape for downstream nn.Linear
+            mlp_input = mlp_input.reshape(*leading, -1)
+        return mlp_input
 
     def forward(self, state: TEN) -> TEN:
         mlp_input = self._encode(state)
@@ -193,15 +206,24 @@ class CriticPPO_Wyckoff(nn.Module):
         return (state - self.state_avg) / (self.state_std + 1e-4)
 
     def _encode(self, state: TEN) -> TEN:
+        """Same 2-D / 3-D handling as ActorPPO_Wyckoff._encode."""
+        leading = state.shape[:-1]
+        if state.dim() >= 3:
+            state = state.reshape(-1, state.shape[-1])
+
         state = self.state_norm(state)
         if self.encoder is not None:
             agent_state = state[:, :self.agent_state_dim]
             window_flat = state[:, self.agent_state_dim:]
             window = window_flat.reshape(-1, self.window_size, self.n_features)
             embedding = self.encoder(window)
-            return th.cat([agent_state, embedding], dim=1)
+            mlp_input = th.cat([agent_state, embedding], dim=1)
         else:
-            return state
+            mlp_input = state
+
+        if len(leading) >= 2:
+            mlp_input = mlp_input.reshape(*leading, -1)
+        return mlp_input
 
     def forward(self, state: TEN) -> TEN:
         mlp_input = self._encode(state)
