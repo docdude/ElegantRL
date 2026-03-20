@@ -390,7 +390,7 @@ def evaluate_split(
         return None
 
     df = pd.DataFrame(rows)
-    df = df.sort_values(['final_return', 'sharpe'], ascending=[False, False])
+    df = df.sort_values(['sharpe', 'final_return'], ascending=[False, False])
     df.to_csv(csv_path, index=False)
     print(f"\n    Saved: {csv_path}")
 
