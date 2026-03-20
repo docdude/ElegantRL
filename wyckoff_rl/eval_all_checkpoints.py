@@ -194,11 +194,11 @@ def evaluate_single_checkpoint(
         cost_per_trade=env_params.get('cost_per_trade', 0.5),
         reward_mode=env_params.get('reward_mode', 'pnl'),
         reward_scale=env_params.get('reward_scale', 1.0),
-        max_position=env_params.get('max_position', 1),
         beg_idx=0,
         end_idx=test_len,
         window_size=env_params.get('window_size', 1),
         feature_indices=env_params.get('feature_indices', None),
+        continuous_sizing=env_params.get('continuous_sizing', False),
     )
 
     # Deterministic rollout
@@ -262,6 +262,7 @@ def evaluate_single_checkpoint(
         'ann_return': final_return,  # approximation for range bars
         'total_reward': total_reward,
         'n_trades': getattr(env, 'total_trades', 0),
+        'turnover': getattr(env, 'total_turnover', 0.0),
         'alpha': alpha,
         'days_beating': days_beating,
         'pct_beating': pct_beating,
