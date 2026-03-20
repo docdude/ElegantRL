@@ -112,7 +112,7 @@ def evaluate_single_checkpoint(
         print(f"    WARN: Failed to load {os.path.basename(checkpoint_path)}: {e}")
         return None
 
-    # Build test env
+    # Build test env (with window_size and feature_indices from training config)
     env = WyckoffTradingEnv(
         npz_path=test_npz,
         initial_amount=initial_amount,
@@ -122,6 +122,8 @@ def evaluate_single_checkpoint(
         max_position=env_params.get('max_position', 1),
         beg_idx=0,
         end_idx=test_len,
+        window_size=env_params.get('window_size', 1),
+        feature_indices=env_params.get('feature_indices', None),
     )
 
     # Deterministic rollout
