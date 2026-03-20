@@ -65,7 +65,8 @@ class ActorPPO_Wyckoff(nn.Module):
     """PPO Actor with 1D CNN temporal encoder for Wyckoff sliding window."""
 
     def __init__(self, net_dims: list[int], state_dim: int, action_dim: int,
-                 n_features: int = 0, window_size: int = 1):
+                 n_features: int = 0, window_size: int = 1,
+                 shared_encoder: TemporalEncoder = None):
         super().__init__()
 
         # Infer n_features and window_size from state_dim if not provided
@@ -82,8 +83,10 @@ class ActorPPO_Wyckoff(nn.Module):
 
         if self.window_size > 1:
             embed_dim = 64
-            self.encoder = TemporalEncoder(self.n_features, self.window_size, embed_dim)
-            mlp_input_dim = agent_state_dim + embed_dim
+            # Use shared encoder if provided, else create own
+            self.encoder = shared_encoder or TemporalEncoder(
+                self.n_features, self.window_size, embed_dim)
+            mlp_input_dim = agent_state_dim + self.encoder.embed_dim
         else:
             # No window: standard MLP (backward compatible)
             self.encoder = None
@@ -167,7 +170,8 @@ class CriticPPO_Wyckoff(nn.Module):
     """PPO Critic with 1D CNN temporal encoder for Wyckoff sliding window."""
 
     def __init__(self, net_dims: list[int], state_dim: int, action_dim: int,
-                 n_features: int = 0, window_size: int = 1):
+                 n_features: int = 0, window_size: int = 1,
+                 shared_encoder: TemporalEncoder = None):
         super().__init__()
         assert isinstance(action_dim, int)
 
@@ -183,8 +187,10 @@ class CriticPPO_Wyckoff(nn.Module):
 
         if self.window_size > 1:
             embed_dim = 64
-            self.encoder = TemporalEncoder(self.n_features, self.window_size, embed_dim)
-            mlp_input_dim = agent_state_dim + embed_dim
+            # Use shared encoder if provided, else create own
+            self.encoder = shared_encoder or TemporalEncoder(
+                self.n_features, self.window_size, embed_dim)
+            mlp_input_dim = agent_state_dim + self.encoder.embed_dim
         else:
             self.encoder = None
             mlp_input_dim = state_dim
