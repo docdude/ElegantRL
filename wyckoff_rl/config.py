@@ -83,7 +83,7 @@ DEFAULT_ERL_PARAMS = {
     "batch_size": 512,
     "break_step": 2_000_000,
     "gamma": 0.99,
-    "lambda_entropy": -0.02,  # Negative: ElegantRL PPO subtracts λ·H, so -0.02 flips it to entropy BONUS
+    "lambda_entropy": -0.005,  # Negative: ElegantRL PPO subtracts λ·H, so -0.005 flips it to gentle entropy bonus
     "clip_grad_norm": 3.0,
     "repeat_times": 4.0,
     "ratio_clip": 0.25,
