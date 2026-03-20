@@ -59,6 +59,9 @@ ADAPTIVE_UPPER_Q = 0.75
 # Environment
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Sliding window & feature selection
+from wyckoff_rl.feature_config import SELECTED_INDICES, N_SELECTED_FEATURES, WINDOW_SIZE
+
 DEFAULT_ENV_PARAMS = {
     "initial_amount": 1000.0,       # in NQ points
     "cost_per_trade": 0.5,          # points per side (covers commission + slippage)
@@ -66,6 +69,8 @@ DEFAULT_ENV_PARAMS = {
     "reward_scale": 2**8,           # 256; targets cumR std ~241 per 1024-step episode (author: keep near 256)
     "num_envs": 256,                # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
     "episode_len": 1024,            # sub-episode length for PPO (~7 sub-episodes in 7.6K bars)
+    "window_size": WINDOW_SIZE,     # sliding window of bars for temporal context
+    "feature_indices": SELECTED_INDICES,  # column indices into 58-feature tech_ary
 }
 
 
@@ -73,7 +78,7 @@ DEFAULT_ENV_PARAMS = {
 # DRL Agent
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL_NAME = "ppo"
+DEFAULT_MODEL_NAME = "wyckoff_ppo"
 RANDOM_SEED = 42
 GPU_ID = 0
 

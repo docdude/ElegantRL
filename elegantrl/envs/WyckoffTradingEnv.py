@@ -69,6 +69,8 @@ class WyckoffTradingEnv:
         beg_idx: int = 0,
         end_idx: int = 0,
         npz_path: str = None,
+        window_size: int = 1,
+        feature_indices: list = None,
         **kwargs,  # absorb extra kwargs from build_env
     ):
         self.npz_path = npz_path
@@ -80,11 +82,18 @@ class WyckoffTradingEnv:
         self.close_ary = self.close_ary[beg_idx:end_idx]
         self.tech_ary = self.tech_ary[beg_idx:end_idx]
 
+        # Feature selection: keep only selected columns
+        if feature_indices is not None:
+            self.tech_ary = self.tech_ary[:, feature_indices]
+
         self.initial_amount = initial_amount
         self.cost_per_trade = cost_per_trade
         self.gamma = gamma
         self.reward_mode = reward_mode
         self.reward_scale = reward_scale
+
+        # Sliding window
+        self.window_size = window_size
 
         # Position tracking
         self.position = 0        # -1, 0, +1
@@ -103,9 +112,10 @@ class WyckoffTradingEnv:
 
         # Env metadata (ElegantRL interface)
         n_features = self.tech_ary.shape[1]
+        self.n_features = n_features
         self.env_name = 'WyckoffTradingEnv-v1'
-        # state = [position(1), unrealized_pnl(1), cash_norm(1), tech_features(n)]
-        self.state_dim = 3 + n_features
+        # state = [position(1), unrealized_pnl(1), cash_norm(1), window(W*F)]
+        self.state_dim = 3 + window_size * n_features
         self.action_dim = 1
         self.if_discrete = False
         self.max_step = self.close_ary.shape[0] - 1
@@ -144,15 +154,28 @@ class WyckoffTradingEnv:
         else:
             unrealized = 0.0
 
-        state = np.concatenate([
-            np.array([
-                float(self.position),
-                np.tanh(unrealized / self.initial_amount),
-                np.tanh(self.cash / self.initial_amount),
-            ], dtype=np.float32),
-            self.tech_ary[self.day],
-        ])
-        return state
+        agent_state = np.array([
+            float(self.position),
+            np.tanh(unrealized / self.initial_amount),
+            np.tanh(self.cash / self.initial_amount),
+        ], dtype=np.float32)
+
+        # Sliding window: tech_ary[day-W+1 : day+1], zero-padded at start
+        W = self.window_size
+        if W <= 1:
+            window_flat = self.tech_ary[self.day]
+        else:
+            start = self.day - W + 1
+            if start >= 0:
+                window_flat = self.tech_ary[start:self.day + 1].flatten()
+            else:
+                # Zero-pad the beginning
+                pad_rows = -start
+                valid = self.tech_ary[0:self.day + 1]  # (day+1, F)
+                pad = np.zeros((pad_rows, self.n_features), dtype=np.float32)
+                window_flat = np.concatenate([pad, valid], axis=0).flatten()
+
+        return np.concatenate([agent_state, window_flat])
 
     def step(self, action) -> Tuple[ARY, float, bool, bool, dict]:
         # Decode action: continuous [-1, 1] → discrete {-1, 0, +1}
@@ -296,6 +319,8 @@ class WyckoffTradingVecEnv:
         gpu_id: int = 0,
         npz_path: str = None,
         episode_len: int = None,
+        window_size: int = 1,
+        feature_indices: list = None,
         **kwargs,
     ):
         self.device = th.device(
@@ -308,6 +333,11 @@ class WyckoffTradingVecEnv:
             end_idx = len(close_ary)
         close_ary = close_ary[beg_idx:end_idx]
         tech_ary = tech_ary[beg_idx:end_idx]
+
+        # Feature selection: keep only selected columns
+        if feature_indices is not None:
+            tech_ary = tech_ary[:, feature_indices]
+
         self.close_price = th.tensor(close_ary, dtype=th.float32, device=self.device)
         self.tech_factor = th.tensor(tech_ary, dtype=th.float32, device=self.device)
 
@@ -321,12 +351,16 @@ class WyckoffTradingVecEnv:
         # Differential Sharpe EMA decay
         self._eta = 0.005
 
+        # Sliding window
+        self.window_size = window_size
+
         # Env metadata
         n_features = self.tech_factor.shape[1]
+        self.n_features = n_features
         self.env_name = 'WyckoffTradingVecEnv-v1'
         self.num_envs = num_envs
         self.max_step = self.close_price.shape[0] - 1
-        self.state_dim = 3 + n_features
+        self.state_dim = 3 + window_size * n_features
         self.action_dim = 1
         self.if_discrete = False
         self.target_return = +np.inf
@@ -335,10 +369,13 @@ class WyckoffTradingVecEnv:
         self._stagger = episode_len is not None and episode_len < self.max_step
         self._episode_len = episode_len if self._stagger else self.max_step
 
-        # vmap functions (following StockTradingVecEnv pattern from the paper)
-        self.vmap_get_state = th.vmap(
-            func=lambda pos, unreal, cash, techs: th.cat((pos, unreal, cash, techs)),
-            in_dims=(0, 0, 0, 0), out_dims=0)
+        # Pre-pad tech_factor with zeros for sliding window (avoids runtime branching)
+        # Shape: (window_size-1 + n_bars, n_features)
+        if window_size > 1:
+            pad = th.zeros(window_size - 1, n_features, dtype=th.float32, device=self.device)
+            self._padded_tech = th.cat([pad, self.tech_factor], dim=0)  # (W-1+N, F)
+        else:
+            self._padded_tech = self.tech_factor
 
         # State tracking (set in reset)
         self.day = None           # (num_envs,) long — per-env position in data
@@ -397,15 +434,33 @@ class WyckoffTradingVecEnv:
         return self.get_state(), {}
 
     def get_state(self):
-        """Return (num_envs, state_dim) tensor using vmap."""
+        """Return (num_envs, state_dim) tensor with sliding window."""
         price = self.close_price[self.day]           # (num_envs,) per-env price
         pos_f = self.position.float().unsqueeze(1)   # (num_envs, 1)
         unrealized = (pos_f * (price - self.entry_price).unsqueeze(1))
-        return self.vmap_get_state(
+
+        agent_state = th.cat([
             pos_f,
             (unrealized / self.initial_amount).tanh(),
             (self.cash / self.initial_amount).tanh().unsqueeze(1),
-            self.tech_factor[self.day])              # (num_envs, n_features)
+        ], dim=1)  # (num_envs, 3)
+
+        W = self.window_size
+        if W <= 1:
+            # No window: just current bar features
+            window_flat = self.tech_factor[self.day]  # (num_envs, F)
+        else:
+            # Sliding window via padded tech array (W-1 zero rows prepended)
+            # day[i] in original data → day[i] + (W-1) in padded → window is [day[i]:day[i]+W]
+            # Build index matrix: (num_envs, W) where each row is [d, d+1, ..., d+W-1]
+            offsets = th.arange(W, device=self.device).unsqueeze(0)  # (1, W)
+            indices = self.day.unsqueeze(1) + offsets                # (num_envs, W)
+            # Gather from padded tech: (num_envs, W, F)
+            window = self._padded_tech[indices]  # advanced indexing
+            # Flatten to (num_envs, W*F)
+            window_flat = window.reshape(self.num_envs, W * self.n_features)
+
+        return th.cat([agent_state, window_flat], dim=1)  # (num_envs, 3 + W*F)
 
     def step(self, action):
         """

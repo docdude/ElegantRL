@@ -69,6 +69,9 @@ def get_agent_class(model_name: str):
     if model_name == "ppo":
         from elegantrl.agents.AgentPPO import AgentPPO
         return AgentPPO
+    elif model_name == "wyckoff_ppo":
+        from wyckoff_rl.wyckoff_agent import AgentPPO_Wyckoff
+        return AgentPPO_Wyckoff
     elif model_name == "sac":
         from elegantrl.agents.AgentSAC import AgentSAC
         return AgentSAC
@@ -139,9 +142,14 @@ def train_split(
     save_sliced_data(test_indices, test_npz, close_ary, tech_ary)
     print(f"  Saved: train={n_train} bars, test={n_test} bars")
 
-    # Compute dims
-    n_features = tech_ary.shape[1]
-    state_dim = 3 + n_features  # position + unrealized_pnl + cash + tech
+    # Compute dims (accounting for feature selection and sliding window)
+    feature_indices = env_params.get('feature_indices', None)
+    window_size = env_params.get('window_size', 1)
+    if feature_indices is not None:
+        n_features = len(feature_indices)
+    else:
+        n_features = tech_ary.shape[1]
+    state_dim = 3 + window_size * n_features  # position + pnl + cash + window(W*F)
     action_dim = 1
     train_max_step = n_train - 1
     test_max_step = n_test - 1
@@ -152,6 +160,7 @@ def train_split(
     # ── 2. Build Config ──────────────────────────────────────────────────
     agent_class = get_agent_class(model_name)
     is_off_policy = model_name.lower() in ("sac", "td3")
+    is_wyckoff_ppo = model_name.lower() == "wyckoff_ppo"
 
     # Auto-scale num_envs and num_workers based on GPU memory
     _cpu_count = os.cpu_count() or 8
@@ -211,6 +220,8 @@ def train_split(
         'reward_scale': env_params.get('reward_scale', 1.0),
         'gpu_id': gpu_id,
         'episode_len': episode_len,
+        'window_size': window_size,
+        'feature_indices': feature_indices,
     }
 
     eval_env_args = env_args.copy()
@@ -246,6 +257,10 @@ def train_split(
         # Huber loss for critic: linear gradient for large errors, MSE for small
         import torch as th
         args.criterion = th.nn.SmoothL1Loss(reduction="none", beta=10.0)
+        # Pass window config for Wyckoff CNN agent
+        if is_wyckoff_ppo:
+            args.n_features = n_features
+            args.window_size = window_size
     else:
         # SAC / TD3
         args.horizon_len = train_max_step // 4
@@ -334,6 +349,8 @@ def evaluate_checkpoint(
     action_dim: int = 1,
     net_dims: list = None,
     gpu_id: int = 0,
+    n_features: int = 0,
+    window_size: int = 1,
 ) -> dict:
     """
     Deterministic evaluation of a saved actor on a test set.
@@ -341,22 +358,37 @@ def evaluate_checkpoint(
     Returns metrics: total_return, sharpe, sortino, max_drawdown, n_trades.
     """
     from elegantrl.envs.WyckoffTradingEnv import WyckoffTradingEnv
-    from elegantrl.agents.AgentPPO import ActorPPO
 
     env_params = {**DEFAULT_ENV_PARAMS, **(env_params or {})}
     net_dims = net_dims or [128, 64]
+    feature_indices = env_params.get('feature_indices', None)
+    ws = env_params.get('window_size', window_size)
 
     data = np.load(npz_path, allow_pickle=True)
     n_bars = data['close_ary'].shape[0]
-    n_features = data['tech_ary'].shape[1]
+    raw_n_features = data['tech_ary'].shape[1]
+    if feature_indices is not None:
+        eff_n_features = len(feature_indices)
+    else:
+        eff_n_features = raw_n_features
+    if n_features <= 0:
+        n_features = eff_n_features
     if state_dim is None:
-        state_dim = 3 + n_features
+        state_dim = 3 + ws * n_features
 
     device = th.device(f"cuda:{gpu_id}" if th.cuda.is_available() else "cpu")
 
-    # Load actor
-    actor = ActorPPO(net_dims=net_dims, state_dim=state_dim, action_dim=action_dim).to(device)
-    actor.load_state_dict(th.load(actor_path, map_location=device))
+    # Load actor (CNN or MLP depending on window_size)
+    if ws > 1:
+        from wyckoff_rl.wyckoff_actor_critic import ActorPPO_Wyckoff
+        actor = ActorPPO_Wyckoff(
+            net_dims=net_dims, state_dim=state_dim, action_dim=action_dim,
+            n_features=n_features, window_size=ws,
+        ).to(device)
+    else:
+        from elegantrl.agents.AgentPPO import ActorPPO
+        actor = ActorPPO(net_dims=net_dims, state_dim=state_dim, action_dim=action_dim).to(device)
+    actor.load_state_dict(th.load(actor_path, map_location=device, weights_only=True))
     actor.eval()
 
     # Build env
@@ -364,7 +396,10 @@ def evaluate_checkpoint(
         npz_path=npz_path,
         beg_idx=0,
         end_idx=n_bars,
-        **env_params,
+        window_size=ws,
+        feature_indices=feature_indices,
+        initial_amount=env_params['initial_amount'],
+        cost_per_trade=env_params['cost_per_trade'],
     )
 
     state, _ = env.reset()
