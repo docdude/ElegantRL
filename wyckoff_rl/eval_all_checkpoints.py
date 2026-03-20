@@ -217,8 +217,13 @@ def evaluate_split(
     split_name = os.path.basename(split_dir)
     meta_path = os.path.join(split_dir, 'split_meta.json')
     if not os.path.exists(meta_path):
-        print(f"  {split_name}: no split_meta.json, skipping")
-        return None
+        # Fallback: parent-level backup saved before init_before_training wipes cwd
+        parent_meta = os.path.join(os.path.dirname(split_dir), f'{split_name}_meta.json')
+        if os.path.exists(parent_meta):
+            meta_path = parent_meta
+        else:
+            print(f"  {split_name}: no split_meta.json, skipping")
+            return None
 
     with open(meta_path) as f:
         meta = json.load(f)
