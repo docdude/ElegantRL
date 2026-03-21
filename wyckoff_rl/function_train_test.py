@@ -72,6 +72,9 @@ def get_agent_class(model_name: str):
     elif model_name == "wyckoff_ppo":
         from wyckoff_rl.wyckoff_agent import AgentPPO_Wyckoff
         return AgentPPO_Wyckoff
+    elif model_name == "wyckoff_wave_ppo":
+        from wyckoff_rl.wyckoff_wave_agent import AgentPPO_WaveNet
+        return AgentPPO_WaveNet
     elif model_name == "sac":
         from elegantrl.agents.AgentSAC import AgentSAC
         return AgentSAC
@@ -160,7 +163,7 @@ def train_split(
     # ── 2. Build Config ──────────────────────────────────────────────────
     agent_class = get_agent_class(model_name)
     is_off_policy = model_name.lower() in ("sac", "td3")
-    is_wyckoff_ppo = model_name.lower() == "wyckoff_ppo"
+    is_wyckoff_ppo = model_name.lower() in ("wyckoff_ppo", "wyckoff_wave_ppo")
 
     # Auto-scale num_envs and num_workers based on GPU memory
     _cpu_count = os.cpu_count() or 8
@@ -257,7 +260,7 @@ def train_split(
         # Huber loss for critic: linear gradient for large errors, MSE for small
         import torch as th
         args.criterion = th.nn.SmoothL1Loss(reduction="none", beta=10.0)
-        # Pass window config for Wyckoff CNN agent
+        # Pass window config for Wyckoff CNN / WaveNet agent
         if is_wyckoff_ppo:
             args.n_features = n_features
             args.window_size = window_size
