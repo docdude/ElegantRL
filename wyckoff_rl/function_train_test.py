@@ -225,6 +225,7 @@ def train_split(
         'episode_len': episode_len,
         'window_size': window_size,
         'feature_indices': feature_indices,
+        'trade_reward_weight': env_params.get('trade_reward_weight', 0.5),
     }
 
     eval_env_args = env_args.copy()
@@ -257,6 +258,7 @@ def train_split(
         args.ratio_clip = erl_params['ratio_clip']
         args.lambda_gae_adv = erl_params['lambda_gae_adv']
         args.if_use_v_trace = erl_params.get('if_use_v_trace', True)
+        args.loss_weight = erl_params.get('loss_weight', 2.0)
         # Huber loss for critic: linear gradient for large errors, MSE for small
         import torch as th
         args.criterion = th.nn.SmoothL1Loss(reduction="none", beta=10.0)

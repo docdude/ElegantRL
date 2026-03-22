@@ -31,6 +31,9 @@ class AgentPPO(AgentBase):
 
         self.if_use_v_trace = getattr(args, 'if_use_v_trace', True)
 
+        # Asymmetric advantage: weight negative advantages more heavily to prioritize loss avoidance
+        self.loss_weight = getattr(args, 'loss_weight', 2.0)  # 1.0 = symmetric (original), 2.0 = 2x penalty for losses
+
     def _explore_one_env(self, env, horizon_len: int, if_random: bool = False) -> tuple[TEN, TEN, TEN, TEN, TEN, TEN]:
         """
         Collect trajectories through the actor-environment interaction for a **single** environment instance.
@@ -196,7 +199,15 @@ class AgentPPO(AgentBase):
         # surrogate1 = advantage * ratio
         # surrogate2 = advantage * ratio.clamp(1 - self.ratio_clip, 1 + self.ratio_clip)
         # surrogate = th.min(surrogate1, surrogate2)  # save as below
-        surrogate = advantage * ratio * th.where(advantage.gt(0), 1 - self.ratio_clip, 1 + self.ratio_clip)
+
+        # Asymmetric weighting: scale negative advantages by loss_weight
+        # This makes the agent learn more aggressively from bad trades (losses)
+        # than from good trades (wins), like a Sortino-style policy gradient.
+        # loss_weight=1.0 recovers standard symmetric PPO.
+        adv_weight = th.where(advantage.lt(0), self.loss_weight, 1.0)
+        weighted_advantage = advantage * adv_weight
+
+        surrogate = weighted_advantage * ratio * th.where(advantage.gt(0), 1 - self.ratio_clip, 1 + self.ratio_clip)
 
         obj_surrogate = (surrogate * unmask).mean()  # major actor objective
         obj_entropy = (entropy * unmask).mean()  # minor actor objective

@@ -407,6 +407,11 @@ class WyckoffTradingVecEnv:
         else:
             self._padded_tech = self.tech_factor
 
+        # Trade-level reward: bonus at position close proportional to trade PnL
+        self.trade_reward_weight = kwargs.get('trade_reward_weight', 0.5)
+        self.entry_price = None   # (num_envs,) price when position was opened
+        self.entry_cash = None    # (num_envs,) cash when position was opened
+
         # State tracking (set in reset)
         self.day = None           # (num_envs,) long — per-env position in data
         self.step_count = None    # (num_envs,) long — steps within current sub-episode
@@ -445,6 +450,8 @@ class WyckoffTradingVecEnv:
         self.total_trades = th.zeros(ne, dtype=th.long, device=dev)
         self.total_turnover = th.zeros(ne, dtype=th.float32, device=dev)
         self.cumulative_returns = [0.0] * ne
+        self.entry_price = th.zeros(ne, dtype=th.float32, device=dev)
+        self.entry_cash = th.zeros(ne, dtype=th.float32, device=dev)
 
         if self._stagger:
             # Random starting positions, leave room for at least one episode
@@ -537,8 +544,13 @@ class WyckoffTradingVecEnv:
         new_total = self.initial_amount + self.cash
         prev_total = self.total_asset
 
-        # Compute reward (vectorized)
+        # Compute bar-level reward (vectorized)
         reward = self._compute_reward(new_total, prev_total, curr_price, prev_price)
+
+        # Trade-level reward bonus: concentrated signal at position changes
+        if self.trade_reward_weight > 0:
+            reward = reward + self._trade_reward_bonus(old_pos, target_pos, curr_price)
+
         self.reward_sum += reward
         self.reward_count += 1
         self.total_asset = new_total
@@ -594,6 +606,8 @@ class WyckoffTradingVecEnv:
         self.reward_count[mask] = 0
         self.total_trades[mask] = 0
         self.total_turnover[mask] = 0.0
+        self.entry_price[mask] = 0.0
+        self.entry_cash[mask] = 0.0
 
     def _compute_reward(self, new_total, prev_total, curr_price, prev_price):
         """Vectorized reward computation. Returns (num_envs,) tensor."""
@@ -631,6 +645,47 @@ class WyckoffTradingVecEnv:
 
         else:
             raise ValueError(f"Unknown reward_mode: {self.reward_mode}")
+
+    def _trade_reward_bonus(self, old_pos, new_pos, curr_price):
+        """
+        Concentrated trade-level reward at position changes.
+
+        Fires when:
+        - Position closes (full or partial): delivers realized PnL as bonus
+        - Position opens: records entry price for later PnL computation
+
+        This gives the agent a clear credit assignment signal at the entry/exit
+        decision point, rather than diffusing it across bar-level M2M PnL.
+        """
+        bonus = th.zeros_like(old_pos)
+
+        # Detect position closing (reducing or flipping)
+        # closing_fraction: how much of the old position was closed
+        # e.g. old=1.0, new=0.0 → closed 1.0; old=1.0, new=-1.0 → closed 1.0
+        was_positioned = old_pos.abs() > 1e-6
+        closed_portion = th.clamp(old_pos.abs() - new_pos * old_pos.sign(), min=0.0)
+        closed_portion = th.clamp(closed_portion, max=old_pos.abs())  # can't close more than held
+        is_closing = was_positioned & (closed_portion > 1e-6)
+
+        if is_closing.any():
+            # Realized PnL on the closed portion
+            trade_pnl = old_pos.sign() * (curr_price - self.entry_price) * closed_portion
+            trade_ret = trade_pnl / self.initial_amount
+            bonus[is_closing] = trade_ret[is_closing] * self.reward_scale * self.trade_reward_weight
+
+        # Detect position opening (was flat or adding)
+        is_opening = (old_pos.abs() < 1e-6) & (new_pos.abs() > 1e-6)
+        if is_opening.any():
+            self.entry_price[is_opening] = curr_price[is_opening]
+            self.entry_cash[is_opening] = self.cash[is_opening]
+
+        # Detect position flip (close + open in one step)
+        is_flipping = was_positioned & (new_pos * old_pos < -1e-6)
+        if is_flipping.any():
+            self.entry_price[is_flipping] = curr_price[is_flipping]
+            self.entry_cash[is_flipping] = self.cash[is_flipping]
+
+        return bonus
 
     def close(self):
         pass

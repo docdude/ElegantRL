@@ -72,6 +72,7 @@ DEFAULT_ENV_PARAMS = {
     "window_size": WINDOW_SIZE,     # sliding window of bars for temporal context
     "feature_indices": SELECTED_INDICES,  # column indices into 58-feature tech_ary
     "continuous_sizing": False,     # False={-1,0,+1} binary, True=[-1,+1] continuous
+    "trade_reward_weight": 0.5,     # 0.0=bar-only (original), 0.5=adds concentrated trade-close bonus
 }
 
 
@@ -97,6 +98,7 @@ DEFAULT_ERL_PARAMS = {
     "if_use_v_trace": True,
     "eval_per_step": 50_000,
     "eval_times": 32,
+    "loss_weight": 2.0,             # Asymmetric advantage: 1.0=symmetric (original PPO), 2.0=2x penalty for losses
 }
 
 

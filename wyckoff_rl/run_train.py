@@ -122,6 +122,12 @@ def parse_args():
                         default=DEFAULT_ERL_PARAMS['batch_size'])
     parser.add_argument("--continuous", action="store_true",
                         help="Use continuous [-1,+1] position sizing instead of binary {-1,0,+1}")
+    parser.add_argument("--loss-weight", type=float,
+                        default=DEFAULT_ERL_PARAMS['loss_weight'],
+                        help="Asymmetric advantage weight for losses (1.0=symmetric, 2.0=2x loss penalty)")
+    parser.add_argument("--trade-reward-weight", type=float,
+                        default=DEFAULT_ENV_PARAMS['trade_reward_weight'],
+                        help="Trade-close bonus weight (0.0=bar-only, 0.5=adds trade PnL bonus)")
 
     # Execution
     parser.add_argument("--split", type=int, default=None,
@@ -231,11 +237,13 @@ def main():
         'learning_rate': args.lr,
         'batch_size': args.batch_size,
         'break_step': args.break_step,
+        'loss_weight': args.loss_weight,
     })
 
     env_params = DEFAULT_ENV_PARAMS.copy()
     env_params['reward_mode'] = args.reward
     env_params['continuous_sizing'] = args.continuous
+    env_params['trade_reward_weight'] = args.trade_reward_weight
 
     # ── Output directory ─────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
