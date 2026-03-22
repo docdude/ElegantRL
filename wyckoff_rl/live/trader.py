@@ -47,8 +47,62 @@ from .adapters import (
     SCIDReplayAdapter, IBLiveAdapter, SCIDTailAdapter,
     SimExecutor, IBExecutor,
 )
+from ..feature_config import ALL_FEATURES
 
 logger = logging.getLogger("wyckoff_trader")
+
+# Feature name → index in the training-feature vector (36 features)
+FEATURE_NAME_TO_IDX = {
+    ALL_FEATURES[all_idx]: train_idx
+    for train_idx, all_idx in enumerate(TRAINING_FEATURE_INDICES)
+}
+
+# Pre-validated veto presets discovered via analyze_filter_candidates.py
+# Each preset: list of (feature_name, operator, threshold) — OR logic
+VETO_PRESETS = {
+    "split3": [
+        ("delta_ratio", "<", -0.044),
+        ("cvd_slope_fast", ">", 0.037),
+    ],
+    "split4": [
+        ("wave_shortening_up", ">", 0.264),
+        ("cvd_divergence", ">", 0.284),
+    ],
+    "wavenet_s0": [
+        ("wave_vol_trend_up", "<", -0.186),
+        ("delta_ratio", "<", -0.064),
+    ],
+}
+
+
+class VetoFilter:
+    """
+    Entry veto filter — blocks new position entries when any rule fires.
+
+    Rules are OR'd: if ANY rule matches, the entry is vetoed.
+    Only vetoes entries (from flat); never prevents exits.
+    """
+
+    def __init__(self, rules: list[tuple[str, str, float]]):
+        self._rules = []
+        for feat_name, op, thresh in rules:
+            idx = FEATURE_NAME_TO_IDX.get(feat_name)
+            if idx is None:
+                raise ValueError(f"Unknown feature: {feat_name}")
+            if op not in (">", "<"):
+                raise ValueError(f"Operator must be '>' or '<', got '{op}'")
+            self._rules.append((feat_name, idx, op, thresh))
+
+    def should_veto(self, features) -> tuple[bool, str]:
+        """Check if entry should be vetoed based on latest bar features."""
+        for feat_name, idx, op, thresh in self._rules:
+            val = float(features[idx])
+            if (op == ">" and val > thresh) or (op == "<" and val < thresh):
+                return True, f"{feat_name}={val:.4f} {op} {thresh}"
+        return False, ""
+
+    def describe(self) -> str:
+        return " OR ".join(f"{n} {o} {t}" for n, _, o, t in self._rules)
 
 
 class WyckoffTrader:
@@ -93,6 +147,7 @@ class WyckoffTrader:
         initial_amount: float = 1000.0,
         max_contracts: int = 1,
         log_dir: str = "live_logs",
+        veto_rules: list[tuple[str, str, float]] | None = None,
     ):
         self.data_adapter = data_adapter
         self.order_adapter = order_adapter
@@ -136,8 +191,12 @@ class WyckoffTrader:
         self._tick_count: int = 0
         self._bar_count: int = 0
         self._n_trades: int = 0
+        self._n_vetoed: int = 0
         self._total_pnl: float = 0.0
         self._trade_log_path: str = ""
+
+        # Veto filter
+        self.veto_filter = VetoFilter(veto_rules) if veto_rules else None
 
         # Wire data adapter callback
         self.data_adapter.on_tick = self._on_tick
@@ -189,7 +248,18 @@ class WyckoffTrader:
             f"ticks={self._tick_count}"
         )
 
-        # 4. Execute position change
+        # 4. Veto filter: block new entries if any rule fires
+        if (self.veto_filter is not None
+                and self._position == 0 and target_pos != 0):
+            veto, reason = self.veto_filter.should_veto(
+                self.inference._window[-1]
+            )
+            if veto:
+                logger.info(f"  ✘ VETO entry → {target_pos:+.1f} | {reason}")
+                self._n_vetoed += 1
+                return
+
+        # 5. Execute position change
         delta = int(round(target_pos - self._position))
         if delta != 0:
             self._execute_trade(delta, bar.close, raw_action, bar)
@@ -265,6 +335,8 @@ class WyckoffTrader:
         logger.info(f"State dim:  {self.inference.state_dim}")
         logger.info(f"Sizing:     {'continuous' if self.inference.continuous_sizing else 'binary'}")
         logger.info(f"Max pos:    {self.max_contracts} contracts")
+        if self.veto_filter:
+            logger.info(f"Veto:       {self.veto_filter.describe()}")
         logger.info(f"Trade log:  {self._trade_log_path}")
         logger.info("=" * 60)
 
@@ -300,6 +372,8 @@ class WyckoffTrader:
         logger.info(f"  Ticks processed:  {self._tick_count:,}")
         logger.info(f"  Bars completed:   {self._bar_count}")
         logger.info(f"  Trades executed:  {self._n_trades}")
+        if self._n_vetoed:
+            logger.info(f"  Entries vetoed:   {self._n_vetoed}")
         logger.info(f"  Total P&L:        ${self._total_pnl:+,.2f}")
         logger.info(f"  Final equity:     ${self.order_adapter.get_account_value():,.2f}")
         logger.info(f"  Trade log:        {self._trade_log_path}")
@@ -366,6 +440,9 @@ Examples:
                         default=os.environ.get("CONTINUOUS_SIZING", "").lower() == "true")
     common.add_argument("--max-contracts", type=int, default=1)
     common.add_argument("--log-dir", type=str, default="live_logs")
+    common.add_argument("--veto-preset", type=str, default=None,
+                        choices=list(VETO_PRESETS.keys()),
+                        help="Named veto filter preset (e.g. split3, split4)")
 
     # — replay ————————————————————————————————————————————————————
     p_replay = sub.add_parser("replay", parents=[common],
@@ -451,6 +528,8 @@ Examples:
         ib.connect()
         order_adapter = IBExecutor(ib)
 
+    veto_rules = VETO_PRESETS.get(args.veto_preset) if args.veto_preset else None
+
     trader = WyckoffTrader(
         checkpoint_path=args.checkpoint,
         data_adapter=data_adapter,
@@ -459,6 +538,7 @@ Examples:
         continuous_sizing=args.continuous,
         max_contracts=args.max_contracts,
         log_dir=args.log_dir,
+        veto_rules=veto_rules,
     )
     trader.start()
 
