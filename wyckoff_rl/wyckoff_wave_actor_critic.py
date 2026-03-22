@@ -52,6 +52,13 @@ class WaveNetResidualBlock(nn.Module):
     Core WaveNet building block:
       tanh(causal_conv(x)) * sigmoid(causal_conv(x))
     followed by 1x1 convs for residual and skip outputs.
+
+    Init strategy (critical for RL's weak gradient signal):
+      - Xavier init for tanh/sigm convs (correct for tanh*sigmoid, not ReLU)
+      - Gate bias = +1.0 so sigmoid starts ~0.73 (mostly open, like LSTM forget gate)
+        This lets signal flow through early, then gates learn to selectively close.
+        Default Kaiming bias=0 → sigmoid(0)=0.5 → half-open saddle point that
+        RL's noisy policy gradient can't escape.
     """
 
     def __init__(self, n_channels: int, kernel_size: int = 3,
@@ -63,6 +70,12 @@ class WaveNetResidualBlock(nn.Module):
                                        kernel_size, dilation)
         self.residual_conv = nn.Conv1d(n_channels, n_channels, 1)
         self.skip_conv = nn.Conv1d(n_channels, n_channels, 1)
+
+        # Xavier init for gated activations (not Kaiming/ReLU)
+        for conv in [self.tanh_conv.conv, self.sigm_conv.conv]:
+            nn.init.xavier_uniform_(conv.weight)
+        # Gate bias +1.0: sigmoid(1)≈0.73, gates start mostly open
+        nn.init.constant_(self.sigm_conv.conv.bias, 1.0)
 
     def forward(self, x: TEN) -> tuple[TEN, TEN]:
         """Returns (residual_out, skip_out)."""
@@ -82,11 +95,10 @@ class WaveNetEncoder(nn.Module):
       3. Sum all skip outputs → GELU → 1x1 conv → global avg pool
       4. Project to embed_dim
 
-    With n_stacks=2 and dilation_rates=[1,2,4,8,16]:
-      Receptive field = n_stacks * sum(dilation_rates) * (kernel_size-1) + 1
-                      = 2 * 31 * 2 + 1 = 125 (well beyond the 30-bar window)
-      Total conv layers: 2 * 5 * 2 = 20 (but only ~10x params vs plain CNN
-        because 1x1 convs are cheap)
+    Dilation rates are capped so no block's receptive field exceeds the
+    window size (avoids kernels that see only zero-padded positions).
+    With window_size=30 and kernel_size=3, max useful dilation = 14,
+    so dilation_rates=[1,2,4,8] are used (d=16 would pad 32 > window 30).
     """
 
     def __init__(self, n_features: int, window_size: int,
@@ -101,10 +113,22 @@ class WaveNetEncoder(nn.Module):
         # Input projection: (B, F, W) → (B, n_channels, W)
         self.input_proj = nn.Conv1d(n_features, n_channels, 1)
 
+        # Cap dilation so left-pad doesn't exceed window size
+        # pad = (kernel_size - 1) * dilation; must be < window_size
+        max_dilation = (window_size - 1) // (kernel_size - 1)
+        effective_rates = tuple(d for d in dilation_rates if d <= max_dilation)
+        if len(effective_rates) < len(dilation_rates):
+            import logging
+            dropped = [d for d in dilation_rates if d > max_dilation]
+            logging.getLogger(__name__).info(
+                f"WaveNet: dropped dilations {dropped} (pad > window_size={window_size}), "
+                f"using {effective_rates}"
+            )
+
         # Stacks of dilated causal conv blocks
         self.blocks = nn.ModuleList()
         for _ in range(n_stacks):
-            for d in dilation_rates:
+            for d in effective_rates:
                 self.blocks.append(
                     WaveNetResidualBlock(n_channels, kernel_size, dilation=d)
                 )
