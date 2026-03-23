@@ -102,7 +102,7 @@ DEFAULT_ERL_PARAMS = {
     "if_use_v_trace": True,
     "eval_per_step": 50_000,
     "eval_times": 32,
-    "loss_weight": 2.0,             # Asymmetric advantage: 1.0=symmetric (original PPO), 2.0=2x penalty for losses
+    "loss_weight": 1.0,             # Asymmetric advantage: 1.0=symmetric (standard PPO), 2.0=2x penalty for losses
 }
 
 
