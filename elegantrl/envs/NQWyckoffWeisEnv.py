@@ -178,6 +178,7 @@ class NQWyckoffWeisEnv:
         mgmt_penalty_scale: float = 0.03,
         overstay_bars: int = 20,
         regime_penalty_scale: float = 0.05,
+        idle_penalty: float = 0.01,
         random_start: bool = True,
         feature_indices: list[int] | None = None,
         **kwargs,
@@ -206,6 +207,7 @@ class NQWyckoffWeisEnv:
         self.mgmt_penalty_scale = mgmt_penalty_scale
         self.overstay_bars = overstay_bars
         self.regime_penalty_scale = regime_penalty_scale
+        self.idle_penalty = idle_penalty
         self.random_start = random_start
         self.max_episode_bars = max_step
 
@@ -443,9 +445,10 @@ class NQWyckoffWeisEnv:
     # ─── Management bonus ─────────────────────────────────────────────────
 
     def _management_bonus(self) -> float:
-        """Reward holding winners, penalise overstaying in losers."""
+        """Reward holding winners, penalise overstaying in losers.
+        When flat, apply idle penalty to discourage all-HOLD collapse."""
         if self._side == 0:
-            return 0.0
+            return -self.idle_penalty
         if self._unrealized > 0:
             return self.mgmt_bonus_scale
         if self._unrealized < 0 and self._bars_in_trade > self.overstay_bars:
@@ -553,6 +556,7 @@ class NQWyckoffWeisVecEnv:
         mgmt_penalty_scale: float = 0.03,
         overstay_bars: int = 20,
         regime_penalty_scale: float = 0.05,
+        idle_penalty: float = 0.01,
         feature_indices: list[int] | None = None,
         gamma: float = 0.99,            # kept for ElegantRL Config compat
         reward_mode: str = "pnl",       # kept for Config compat
@@ -592,6 +596,7 @@ class NQWyckoffWeisVecEnv:
         self.mgmt_penalty_scale = mgmt_penalty_scale
         self.overstay_bars = overstay_bars
         self.regime_penalty_scale = regime_penalty_scale
+        self.idle_penalty = idle_penalty
         self.pnl_norm = 10.0 * tick_value  # $50 normalisation
         self.gamma = gamma
 
@@ -930,19 +935,23 @@ class NQWyckoffWeisVecEnv:
     def _compute_management_bonus(self):
         """
         Reward holding winners, penalise overstaying in losers.
+        When flat, apply idle penalty to discourage all-HOLD collapse.
 
+        -idle_penalty      per bar while flat (no position).
         +mgmt_bonus_scale  per bar while in a winning position.
         -mgmt_penalty_scale per bar when in a losing position too long.
         """
         ne = self.num_envs
         bonus = th.zeros(ne, dtype=th.float32, device=self.device)
 
-        positioned = self.pos_side != 0
+        is_flat = self.pos_side == 0
+        positioned = ~is_flat
         winning = positioned & (self.unrealized_pnl > 0)
         losing_overstay = (positioned
                            & (self.unrealized_pnl < 0)
                            & (self.bars_in_trade > self.overstay_bars))
 
+        bonus = th.where(is_flat, bonus - self.idle_penalty, bonus)
         bonus = th.where(winning, bonus + self.mgmt_bonus_scale, bonus)
         bonus = th.where(losing_overstay, bonus - self.mgmt_penalty_scale, bonus)
         return bonus
