@@ -63,16 +63,20 @@ ADAPTIVE_UPPER_Q = 0.75
 from wyckoff_rl.feature_config import SELECTED_INDICES, N_SELECTED_FEATURES, WINDOW_SIZE
 
 DEFAULT_ENV_PARAMS = {
-    "initial_amount": 1000.0,       # in NQ points
-    "cost_per_trade": 0.5,          # points per side (covers commission + slippage)
+    "initial_amount": 1000.0,       # in NQ points (legacy continuous env)
+    "cost_per_trade": 0.5,          # points per side (legacy continuous env)
     "reward_mode": "pnl",           # "pnl", "log_ret", "sharpe", "sortino"
-    "reward_scale": 2**8,           # 256; targets cumR std ~241 per 1024-step episode (author: keep near 256)
+    "reward_scale": 1.0,            # NQ discrete env handles its own scaling
     "num_envs": 256,                # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
     "episode_len": 1024,            # sub-episode length for PPO (~7 sub-episodes in 7.6K bars)
-    "window_size": WINDOW_SIZE,     # sliding window of bars for temporal context
-    "feature_indices": SELECTED_INDICES,  # column indices into 58-feature tech_ary
+    "window_size": WINDOW_SIZE,     # sliding window of bars for temporal context (legacy continuous)
+    "feature_indices": SELECTED_INDICES,  # column indices into 61-feature tech_ary (legacy continuous)
     "continuous_sizing": False,     # False={-1,0,+1} binary, True=[-1,+1] continuous
     "trade_reward_weight": 0.5,     # 0.0=bar-only (original), 0.5=adds concentrated trade-close bonus
+    # NQ Wyckoff-Weis discrete env params
+    "commission": 1.50,             # $ per side per contract (NQ)
+    "slippage_ticks": 1.0,          # ticks of slippage per side
+    "max_position_size": 2,         # max contracts
 }
 
 
@@ -80,7 +84,7 @@ DEFAULT_ENV_PARAMS = {
 # DRL Agent
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL_NAME = "ppo"
+DEFAULT_MODEL_NAME = "discrete_ppo"
 RANDOM_SEED = 42
 GPU_ID = 0
 

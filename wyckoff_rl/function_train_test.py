@@ -66,7 +66,10 @@ def save_sliced_data(
 
 def get_agent_class(model_name: str):
     model_name = model_name.lower()
-    if model_name == "ppo":
+    if model_name == "discrete_ppo":
+        from elegantrl.agents.AgentPPO import AgentDiscretePPO
+        return AgentDiscretePPO
+    elif model_name == "ppo":
         from elegantrl.agents.AgentPPO import AgentPPO
         return AgentPPO
     elif model_name == "wyckoff_ppo":
@@ -107,17 +110,27 @@ def train_split(
     Train a DRL agent on one CPCV split.
 
     1. Pre-slices arrays → temp NPZ files
-    2. Creates WyckoffTradingVecEnv pointing at train NPZ
+    2. Creates env (NQWyckoffWeisVecEnv for discrete, WyckoffTradingVecEnv for continuous)
     3. Trains with ElegantRL's multiprocessing trainer (GPU-vectorized)
     4. Evaluates on test NPZ
     5. Returns metrics
     """
     from elegantrl.train.config import Config
     from elegantrl.train.run import train_agent
-    from elegantrl.envs.WyckoffTradingEnv import WyckoffTradingVecEnv
 
     erl_params = {**DEFAULT_ERL_PARAMS, **(erl_params or {})}
     env_params = {**DEFAULT_ENV_PARAMS, **(env_params or {})}
+
+    is_nq_discrete = model_name.lower() == "discrete_ppo"
+
+    if is_nq_discrete:
+        from elegantrl.envs.NQWyckoffWeisEnv import (
+            NQWyckoffWeisVecEnv, N_ENV_FEATURES, N_POSITION_FEATURES, N_ACTIONS,
+        )
+        env_class = NQWyckoffWeisVecEnv
+    else:
+        from elegantrl.envs.WyckoffTradingEnv import WyckoffTradingVecEnv
+        env_class = WyckoffTradingVecEnv
 
     train_indices = np.sort(train_indices)
     test_indices = np.sort(test_indices)
@@ -145,20 +158,24 @@ def train_split(
     save_sliced_data(test_indices, test_npz, close_ary, tech_ary)
     print(f"  Saved: train={n_train} bars, test={n_test} bars")
 
-    # Compute dims (accounting for feature selection and sliding window)
-    feature_indices = env_params.get('feature_indices', None)
-    window_size = env_params.get('window_size', 1)
-    if feature_indices is not None:
-        n_features = len(feature_indices)
+    # Compute dims
+    if is_nq_discrete:
+        state_dim = N_ENV_FEATURES + N_POSITION_FEATURES   # 38 + 8 = 46
+        action_dim = N_ACTIONS                              # 6
     else:
-        n_features = tech_ary.shape[1]
-    state_dim = 3 + window_size * n_features  # position + pnl + cash + window(W*F)
-    action_dim = 1
+        feature_indices = env_params.get('feature_indices', None)
+        window_size = env_params.get('window_size', 1)
+        if feature_indices is not None:
+            n_features = len(feature_indices)
+        else:
+            n_features = tech_ary.shape[1]
+        state_dim = 3 + window_size * n_features  # position + pnl + cash + window(W*F)
+        action_dim = 1
     train_max_step = n_train - 1
     test_max_step = n_test - 1
 
     num_envs = env_params.get('num_envs', 256)
-    episode_len = env_params.get('episode_len', 4096)
+    episode_len = env_params.get('episode_len', 1024)
 
     # ── 2. Build Config ──────────────────────────────────────────────────
     agent_class = get_agent_class(model_name)
@@ -206,38 +223,78 @@ def train_split(
         cwd_base = os.path.join(RESULTS_DIR, f"Wyckoff_{model_name.upper()}_{random_seed}")
     cwd = os.path.join(cwd_base, f"split_{split_idx}")
 
-    env_args = {
-        'env_name': 'WyckoffTradingVecEnv-v1',
-        'num_envs': num_envs,
-        'max_step': train_max_step,
-        'state_dim': state_dim,
-        'action_dim': action_dim,
-        'if_discrete': False,
-        'beg_idx': 0,
-        'end_idx': n_train,
-        'npz_path': train_npz,
-        'initial_amount': env_params['initial_amount'],
-        'cost_per_trade': env_params['cost_per_trade'],
-        'gamma': erl_params.get('gamma', 0.99),
-        'reward_mode': env_params.get('reward_mode', 'pnl'),
-        'reward_scale': env_params.get('reward_scale', 1.0),
-        'gpu_id': gpu_id,
-        'episode_len': episode_len,
-        'window_size': window_size,
-        'feature_indices': feature_indices,
-        'trade_reward_weight': env_params.get('trade_reward_weight', 0.5),
-    }
+    if is_nq_discrete:
+        # ── NQ Wyckoff-Weis discrete env ─────────────────────────────────
+        env_args = {
+            'env_name': 'NQWyckoffWeisVecEnv-v1',
+            'num_envs': num_envs,
+            'max_step': train_max_step,
+            'state_dim': state_dim,
+            'action_dim': action_dim,
+            'if_discrete': True,
+            'npz_path': train_npz,
+            'beg_idx': 0,
+            'end_idx': n_train,
+            'gpu_id': gpu_id,
+            'episode_len': episode_len,
+            'commission': env_params.get('commission', 1.50),
+            'slippage_ticks': env_params.get('slippage_ticks', 1.0),
+            'tick_size': 0.25,
+            'tick_value': 5.0,
+            'max_position_size': env_params.get('max_position_size', 2),
+            'reward_scale': env_params.get('reward_scale', 1.0),
+            'event_threshold': 0.3,
+            'entry_bonus_scale': 0.25,
+            'invalid_penalty': 0.02,
+            'mgmt_bonus_scale': 0.02,
+            'mgmt_penalty_scale': 0.03,
+            'overstay_bars': 20,
+            'regime_penalty_scale': 0.05,
+            'gamma': erl_params.get('gamma', 0.99),
+            'reward_mode': env_params.get('reward_mode', 'pnl'),
+        }
 
-    eval_env_args = env_args.copy()
-    eval_env_args.update({
-        'max_step': test_max_step,
-        'end_idx': n_test,
-        'npz_path': test_npz,
-        'episode_len': None,  # eval walks test data, no sub-episodes
-    })
+        eval_env_args = env_args.copy()
+        eval_env_args.update({
+            'max_step': test_max_step,
+            'end_idx': n_test,
+            'npz_path': test_npz,
+            'episode_len': None,  # eval walks full test data
+        })
+    else:
+        # ── Legacy continuous WyckoffTrading env ─────────────────────────
+        env_args = {
+            'env_name': 'WyckoffTradingVecEnv-v1',
+            'num_envs': num_envs,
+            'max_step': train_max_step,
+            'state_dim': state_dim,
+            'action_dim': action_dim,
+            'if_discrete': False,
+            'beg_idx': 0,
+            'end_idx': n_train,
+            'npz_path': train_npz,
+            'initial_amount': env_params['initial_amount'],
+            'cost_per_trade': env_params['cost_per_trade'],
+            'gamma': erl_params.get('gamma', 0.99),
+            'reward_mode': env_params.get('reward_mode', 'pnl'),
+            'reward_scale': env_params.get('reward_scale', 1.0),
+            'gpu_id': gpu_id,
+            'episode_len': episode_len,
+            'window_size': window_size,
+            'feature_indices': feature_indices,
+            'trade_reward_weight': env_params.get('trade_reward_weight', 0.5),
+        }
 
-    args = Config(agent_class, WyckoffTradingVecEnv, env_args)
-    args.eval_env_class = WyckoffTradingVecEnv
+        eval_env_args = env_args.copy()
+        eval_env_args.update({
+            'max_step': test_max_step,
+            'end_idx': n_test,
+            'npz_path': test_npz,
+            'episode_len': None,  # eval walks test data, no sub-episodes
+        })
+
+    args = Config(agent_class, env_class, env_args)
+    args.eval_env_class = env_class
     args.eval_env_args = eval_env_args
 
     # Agent hyperparams

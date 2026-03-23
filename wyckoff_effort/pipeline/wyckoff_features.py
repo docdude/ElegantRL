@@ -598,6 +598,52 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 40.0) ->
     atr = _rolling_mean(np.abs(np.diff(c, prepend=c[0])), 20) * 20.0
     atr = np.maximum(atr, EPSILON)
 
+    # ── New: absolute wave effort/result + temporal features ─────────
+    # wave_effort_result_raw: cumulative vol / displacement for current wave
+    # (absolute E/R per wave, not a comparison — fills srl-python-indicators gap)
+    wave_er_raw = _safe_div(waves["wave_vol"], np.maximum(wave_disp, EPSILON))
+    avg_wave_er = _rolling_mean(wave_er_raw, 50)
+    wave_effort_result_raw = np.clip(_safe_div(wave_er_raw, avg_wave_er), 0, 5.0)
+
+    # wave_time_norm: calendar duration of current wave in seconds, normalized.
+    # For range bars, bar count ≠ time: slow consolidation bars can be minutes
+    # while fast trend bars form in seconds. This adds temporal dimension.
+    n = len(c)
+    wave_dur_sec = np.zeros(n, dtype=np.float64)
+    if isinstance(df.index, pd.DatetimeIndex):
+        ts_ns = df.index.astype(np.int64).values  # nanoseconds since epoch
+        last_wave_id = waves["wave_id"][0]
+        wave_start = ts_ns[0]
+        for i in range(n):
+            if waves["wave_id"][i] != last_wave_id:
+                wave_start = ts_ns[i]
+                last_wave_id = waves["wave_id"][i]
+            wave_dur_sec[i] = max((ts_ns[i] - wave_start) / 1e9, 0.0)
+    elif "duration_seconds" in df.columns:
+        # Fallback: sum bar durations within each wave
+        bar_dur = df["duration_seconds"].values.astype(np.float64)
+        last_wave_id = waves["wave_id"][0]
+        cum_dur = bar_dur[0]
+        for i in range(n):
+            if waves["wave_id"][i] != last_wave_id:
+                cum_dur = bar_dur[i]
+                last_wave_id = waves["wave_id"][i]
+            else:
+                cum_dur += bar_dur[i] if i > 0 else 0.0
+            wave_dur_sec[i] = cum_dur
+    else:
+        # Last resort: approximate from bar count (30s avg per range bar)
+        wave_dur_sec = wave_bars * 30.0
+
+    avg_wave_dur = _rolling_mean(wave_dur_sec, 50)
+    wave_time_norm = np.clip(_safe_div(wave_dur_sec, avg_wave_dur), 0, 5.0)
+
+    # wave_velocity_norm: displacement per second (price movement speed).
+    # High velocity = strong directional conviction; low = grinding/choppy.
+    wave_vel = _safe_div(wave_disp, np.maximum(wave_dur_sec, EPSILON))
+    avg_wave_vel = _rolling_mean(wave_vel, 50)
+    wave_velocity_norm = np.clip(_safe_div(wave_vel, avg_wave_vel), 0, 5.0)
+
     result = pd.DataFrame({
         # Current wave state (5)
         "wave_direction": waves["wave_dir"],
@@ -622,6 +668,10 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 40.0) ->
         "wave_shortening_down": sd["wave_shortening_down"],
         "yellow_bar": comp["yellow_bar"],
         "large_wave_score": np.clip(comp["large_wave_score"], 0, 5.0),
+        # Absolute wave E/R + temporal (3) — fills srl-python-indicators gaps
+        "wave_effort_result_raw": wave_effort_result_raw,
+        "wave_time_norm": wave_time_norm,
+        "wave_velocity_norm": wave_velocity_norm,
     }, index=df.index)
 
     logger.info(f"Block 2 (Weis Wave): {result.shape[1]} features computed, "

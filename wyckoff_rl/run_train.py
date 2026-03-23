@@ -95,8 +95,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Wyckoff RL — Adaptive CPCV Training"
     )
-    parser.add_argument("--model", type=str, default="ppo",
-                        choices=["ppo", "wyckoff_ppo", "wyckoff_wave_ppo", "sac", "td3"])
+    parser.add_argument("--model", type=str, default="discrete_ppo",
+                        choices=["discrete_ppo", "ppo", "wyckoff_ppo", "wyckoff_wave_ppo", "sac", "td3"])
     parser.add_argument("--reward", type=str, default=DEFAULT_ENV_PARAMS['reward_mode'],
                         choices=["pnl", "log_ret", "sharpe", "sortino"],
                         help="Reward function")
@@ -128,6 +128,15 @@ def parse_args():
     parser.add_argument("--trade-reward-weight", type=float,
                         default=DEFAULT_ENV_PARAMS['trade_reward_weight'],
                         help="Trade-close bonus weight (0.0=bar-only, 0.5=adds trade PnL bonus)")
+
+    # NQ Wyckoff-Weis env params
+    parser.add_argument("--episode-len", type=int,
+                        default=DEFAULT_ENV_PARAMS.get('episode_len', 1024))
+    parser.add_argument("--commission", type=float, default=1.50,
+                        help="$ per side per contract")
+    parser.add_argument("--slippage-ticks", type=float, default=1.0)
+    parser.add_argument("--max-pos", type=int, default=2,
+                        help="Max position size (contracts)")
 
     # Execution
     parser.add_argument("--split", type=int, default=None,

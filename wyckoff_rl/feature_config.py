@@ -1,7 +1,7 @@
 """
 Curated feature selection for Wyckoff sliding-window observation.
 
-Based on feature-return correlation analysis (58 → 33 features):
+Based on feature-return correlation analysis (61 → 39 features):
   - Drops near-zero-signal features (|r| < 0.01 at all horizons)
   - Drops redundant features (|r_pair| > 0.8)
   - Drops degenerate features (2-3 unique values)
@@ -14,7 +14,7 @@ replacing hand-crafted temporal compressions (decay timers, phase scores)
 with learned temporal pattern recognition.
 """
 
-# All 58 features in the original NPZ, in order
+# All 61 features in the original NPZ, in order
 ALL_FEATURES = [
     'body_ratio', 'upper_wick_ratio', 'lower_wick_ratio', 'close_location', 'delta_ratio',
     'vol_vs_ma20', 'vol_vs_ma50', 'er_ratio', 'duration_norm', 'cvd_slope_fast',
@@ -23,6 +23,7 @@ ALL_FEATURES = [
     'wave_vol_vs_same', 'wave_vol_vs_prev', 'wave_disp_vs_same', 'wave_disp_vs_prev', 'wave_er_vs_same',
     'wave_er_vs_prev', 'wave_delta_vs_same', 'demand_score_3wave', 'supply_score_3wave', 'wave_vol_trend_up',
     'wave_vol_trend_down', 'wave_shortening_up', 'wave_shortening_down', 'yellow_bar', 'large_wave_score',
+    'wave_effort_result_raw', 'wave_time_norm', 'wave_velocity_norm',
     'spring_score', 'upthrust_score', 'sc_score', 'bc_score', 'absorption_score',
     'absorption_direction', 'stopping_action_score', 'bars_since_spring', 'bars_since_upthrust', 'bars_since_climax',
     'cumulative_absorption', 'event_sequence_bull', 'event_sequence_bear', 'pct_in_range', 'range_width_norm',
@@ -64,7 +65,7 @@ SELECTED_FEATURES = [
     'return_5',                 # 5-bar momentum context
     'volatility_20',            # Regime / contraction detection
 
-    # Block 2: Weis Wave Analysis (14 of 20)
+    # Block 2: Weis Wave Analysis (17 of 23)
     'wave_progress',            # Where we are in current wave
     'wave_displacement_norm',   # Current wave size vs typical
     'wave_vol_cumulative_norm', # Current wave volume vs typical
@@ -82,6 +83,9 @@ SELECTED_FEATURES = [
     'wave_shortening_down',     # Displacement exhaustion (down)
     'yellow_bar',               # Cur vol exceeds prev same-dir total
     'large_wave_score',         # Cur vol / avg of last 4 completed
+    'wave_effort_result_raw',   # Absolute wave vol/displacement ratio
+    'wave_time_norm',           # Wave calendar duration (temporal gap)
+    'wave_velocity_norm',       # Wave displacement per second (speed)
 
     # Block 3: Wyckoff Events — raw scores as temporal landmarks (5 of 13)
     'spring_score',             # Spring detection (87% zero → landmark in window)
@@ -97,7 +101,7 @@ SELECTED_FEATURES = [
     'bars_in_range',            # How developed the range is
 ]
 
-N_SELECTED_FEATURES = len(SELECTED_FEATURES)  # 33
+N_SELECTED_FEATURES = len(SELECTED_FEATURES)  # 39
 
 # Precompute column indices for fast slicing
 SELECTED_INDICES = [ALL_FEATURES.index(f) for f in SELECTED_FEATURES]
