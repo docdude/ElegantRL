@@ -30,6 +30,7 @@ Usage:
 import argparse
 import logging
 import os
+import pathlib
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -43,7 +44,9 @@ for name in ['wyckoff_effort.pipeline.wyckoff_features',
              'wyckoff_rl', 'wyckoff_features']:
     logging.getLogger(name).setLevel(logging.ERROR)
 
-sys.path.insert(0, '/opt/ElegantRL')
+_PROJECT_ROOT = str(pathlib.Path(__file__).resolve().parents[2])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from wyckoff_rl.live.live_features import TRAINING_FEATURE_INDICES
 from wyckoff_rl.feature_config import ALL_FEATURES
@@ -51,7 +54,7 @@ from wyckoff_rl.feature_config import ALL_FEATURES
 FEATURE_NAMES = [ALL_FEATURES[i] for i in TRAINING_FEATURE_INDICES]
 N_FEATURES = len(FEATURE_NAMES)
 
-SCID_PATH = '/opt/SierraChart/Data/NQH26-CME.scid'
+SCID_PATH = os.environ.get('SCID_PATH', '/opt/SierraChart/Data/NQH26-CME.scid')
 START_DATE = '2026-01-15'
 END_DATE = '2026-03-18'
 INITIAL_CAPITAL = 250_000.0

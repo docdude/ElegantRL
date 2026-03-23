@@ -24,34 +24,38 @@ Usage:
 
 import argparse
 import os
+import pathlib
 import sys
 from typing import List
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, '/opt/ElegantRL')
+_PROJECT_ROOT = str(pathlib.Path(__file__).resolve().parents[2])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Defaults
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCID_PATH = '/opt/SierraChart/Data/NQH26-CME.scid'
+SCID_PATH = os.environ.get('SCID_PATH', '/opt/SierraChart/Data/NQH26-CME.scid')
 START_DATE = '2026-01-15'
 END_DATE = '2026-03-18'
 
 # Known-good checkpoints + trade logs for regression testing
+_ROOT = _PROJECT_ROOT
 REGRESSION_SUITE = [
     {
         'label': 'studio2c_split4',
-        'checkpoint': '/opt/ElegantRL/wyckoff_rl/live/checkpoints/studio2_continuous/split4_actor__000000874496_00444.927.pt',
-        'trade_log': '/opt/ElegantRL/wyckoff_rl/live_logs/studio2c_s2c_split4_s2.37/trades_20260321_001132.csv',
+        'checkpoint': os.path.join(_ROOT, 'wyckoff_rl/live/checkpoints/studio2_continuous/split4_actor__000000874496_00444.927.pt'),
+        'trade_log': os.path.join(_ROOT, 'wyckoff_rl/live_logs/studio2c_s2c_split4_s2.37/trades_20260321_001132.csv'),
         'continuous': True,
     },
     {
         'label': 'filtered_split4+veto',
-        'checkpoint': '/opt/ElegantRL/wyckoff_rl/live/checkpoints/studio2_continuous/split4_actor__000000874496_00444.927.pt',
-        'trade_log': '/opt/ElegantRL/wyckoff_rl/live_logs/filtered_split4+veto/trades_20260321_155538.csv',
+        'checkpoint': os.path.join(_ROOT, 'wyckoff_rl/live/checkpoints/studio2_continuous/split4_actor__000000874496_00444.927.pt'),
+        'trade_log': os.path.join(_ROOT, 'wyckoff_rl/live_logs/filtered_split4+veto/trades_20260321_155538.csv'),
         'continuous': True,
         'veto_preset': 'split4',
         'pnl_tol': 0.15,   # veto compounds bar-boundary diffs → wider tolerance

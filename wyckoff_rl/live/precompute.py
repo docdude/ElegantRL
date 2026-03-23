@@ -32,7 +32,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-sys.path.insert(0, '/opt/ElegantRL')
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from wyckoff_rl.live.range_bar_builder import RangeBarBuilder
 from wyckoff_rl.live.live_features import TRAINING_FEATURE_INDICES, N_TRAINING_FEATURES

@@ -19,12 +19,10 @@ import pandas as pd
 from typing import Optional
 
 # Add the pipeline directory to path so we can import wyckoff_features
-_PIPELINE_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..",
-                              "wyckoff_effort", "pipeline")
-# Also try the /opt/finrl path
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.normpath(os.path.join(_THIS_DIR, "..", ".."))
 _PIPELINE_DIRS = [
-    os.path.abspath(_PIPELINE_DIR),
-    "/opt/finrl/wyckoff_effort/pipeline",
+    os.path.join(_PROJECT_ROOT, "wyckoff_effort", "pipeline"),
     os.path.expanduser("~/wyckoff_effort/pipeline"),
 ]
 for d in _PIPELINE_DIRS:

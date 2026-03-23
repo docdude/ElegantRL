@@ -38,6 +38,7 @@ Usage examples:
 import argparse
 import logging
 import os
+import pathlib
 import sys
 import time
 from datetime import datetime, timezone
@@ -51,7 +52,9 @@ for name in ['wyckoff_effort.pipeline.wyckoff_features',
              'wyckoff_rl', 'wyckoff_features']:
     logging.getLogger(name).setLevel(logging.ERROR)
 
-sys.path.insert(0, '/opt/ElegantRL')
+_PROJECT_ROOT = str(pathlib.Path(__file__).resolve().parents[2])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from wyckoff_rl.live.trader import VETO_PRESETS
 
@@ -60,7 +63,7 @@ from wyckoff_rl.live.trader import VETO_PRESETS
 # Defaults
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCID_PATH = '/opt/SierraChart/Data/NQH26-CME.scid'
+SCID_PATH = os.environ.get('SCID_PATH', '/opt/SierraChart/Data/NQH26-CME.scid')
 START_DATE = '2026-01-15'
 END_DATE = '2026-03-18'
 INITIAL_CAPITAL = 250_000.0
