@@ -87,7 +87,7 @@ def train_agent_single_process(args: Config):
     eval_env_class = args.eval_env_class if args.eval_env_class else args.env_class
     eval_env_args = args.eval_env_args if args.eval_env_args else args.env_args
     eval_env = build_env(eval_env_class, eval_env_args, args.gpu_id)
-    evaluator = Evaluator(cwd=args.cwd, env=eval_env, args=args, if_tensorboard=False)
+    evaluator = Evaluator(cwd=args.cwd, env=eval_env, args=args, if_tensorboard=True)
     if args.continue_train:
         evaluator.save_or_load_recoder(if_save=False)  # restore total_step from recorder.npy
 

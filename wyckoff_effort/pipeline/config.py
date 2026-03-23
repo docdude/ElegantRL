@@ -46,7 +46,7 @@ WYCKOFF_PARAMS = {
 
 # ── New Feature Engineering Settings (wyckoff_features.py) ──────────────────
 
-REVERSAL_POINTS = 200.0  # ZigZag reversal for Weis Wave (5× bar size)
+REVERSAL_POINTS = 40.0  # ZigZag reversal = 1× bar size (matches live precompute)
 
 
 # ── Feature Schema ───────────────────────────────────────────────────────────

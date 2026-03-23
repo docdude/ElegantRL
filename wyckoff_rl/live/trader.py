@@ -57,20 +57,35 @@ FEATURE_NAME_TO_IDX = {
     for train_idx, all_idx in enumerate(TRAINING_FEATURE_INDICES)
 }
 
-# Pre-validated veto presets discovered via analyze_filter_candidates.py
+# Pre-validated veto presets discovered via discover_veto.py (2026-03-22)
 # Each preset: list of (feature_name, operator, threshold) — OR logic
+# Verified on 6082-bar SCID replay (Jan 15 – Mar 18, 2026)
 VETO_PRESETS = {
+    # CNN (studio2_continuous)
+    "cnn_split3": [
+        ("cvd_slope_fast", ">", 0.026),
+        ("wave_delta_ratio", "<", -0.053),
+    ],
+    "cnn_split4": [
+        ("wave_progress", ">", 0.250),
+        ("upper_wick_ratio", ">", 0.590),
+    ],
+    # WaveNet weighted — best OOS model
+    "wavenet_single": [
+        ("large_wave_score", ">", 0.950),
+    ],
+    "wavenet_pair": [
+        ("large_wave_score", ">", 0.950),
+        ("range_width_norm", "<", 0.176),
+    ],
+    # Legacy aliases
     "split3": [
-        ("delta_ratio", "<", -0.044),
-        ("cvd_slope_fast", ">", 0.037),
+        ("cvd_slope_fast", ">", 0.026),
+        ("wave_delta_ratio", "<", -0.053),
     ],
     "split4": [
-        ("wave_shortening_up", ">", 0.264),
-        ("cvd_divergence", ">", 0.284),
-    ],
-    "wavenet_s0": [
-        ("wave_vol_trend_up", "<", -0.186),
-        ("delta_ratio", "<", -0.064),
+        ("wave_progress", ">", 0.250),
+        ("upper_wick_ratio", ">", 0.590),
     ],
 }
 

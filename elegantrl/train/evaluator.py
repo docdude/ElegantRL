@@ -79,17 +79,15 @@ class Evaluator:
         '''record the training information'''
         self.recorder.append((self.total_step, avg_r, std_r, exp_r, *value_tuple))  # update recorder
         if self.tensorboard:
-            self.tensorboard.add_scalar("info/critic_loss_sample", value_tuple[0], self.total_step)
-            self.tensorboard.add_scalar("info/actor_obj_sample", -1 * value_tuple[1], self.total_step)
-            self.tensorboard.add_scalar("reward/avg_reward_sample", avg_r, self.total_step)
-            self.tensorboard.add_scalar("reward/std_reward_sample", std_r, self.total_step)
-            self.tensorboard.add_scalar("reward/exp_reward_sample", exp_r, self.total_step)
-
-            self.tensorboard.add_scalar("info/critic_loss_time", value_tuple[0], train_time)
-            self.tensorboard.add_scalar("info/actor_obj_time", -1 * value_tuple[1], train_time)
-            self.tensorboard.add_scalar("reward/avg_reward_time", avg_r, train_time)
-            self.tensorboard.add_scalar("reward/std_reward_time", std_r, train_time)
-            self.tensorboard.add_scalar("reward/exp_reward_time", exp_r, train_time)
+            self.tensorboard.add_scalar("loss/critic", value_tuple[0], self.total_step)
+            self.tensorboard.add_scalar("loss/actor_obj", -1 * value_tuple[1], self.total_step)
+            if len(value_tuple) > 2:
+                self.tensorboard.add_scalar("loss/entropy", value_tuple[2], self.total_step)
+            self.tensorboard.add_scalar("reward/avg_reward", avg_r, self.total_step)
+            self.tensorboard.add_scalar("reward/std_reward", std_r, self.total_step)
+            self.tensorboard.add_scalar("reward/exp_reward", exp_r, self.total_step)
+            self.tensorboard.add_scalar("episode/avg_steps", avg_s, self.total_step)
+            self.tensorboard.add_scalar("episode/std_steps", std_s, self.total_step)
 
         '''print some information to Terminal'''
         prev_max_r = self.max_r
