@@ -309,17 +309,18 @@ class PrecomputedReplay:
             if continuous:
                 # Training env uses fractional positions directly.
                 # Mark-to-market: PnL from holding old position during bar.
-                pos_change = abs(target_pos - position)
+                old_position = position
+                pos_change = abs(target_pos - old_position)
                 if pos_change > 1e-6:
                     # Realize P&L on closing portion of old position
                     pnl = 0.0
-                    if abs(position) > 1e-6:
-                        pnl_pts = (price - entry_price) * (1 if position > 0 else -1)
+                    if abs(old_position) > 1e-6:
+                        pnl_pts = (price - entry_price) * (1 if old_position > 0 else -1)
                         # Closing fraction = overlap between old and new
-                        if (position > 0 and target_pos < position) or \
-                           (position < 0 and target_pos > position):
-                            closed_frac = min(abs(position),
-                                              abs(target_pos - position))
+                        if (old_position > 0 and target_pos < old_position) or \
+                           (old_position < 0 and target_pos > old_position):
+                            closed_frac = min(abs(old_position),
+                                              abs(target_pos - old_position))
                             # Scale to 1 contract ($20/pt)
                             pnl = closed_frac * pnl_pts * 20.0
                             trade_pnls.append(pnl)
@@ -337,7 +338,7 @@ class PrecomputedReplay:
                         ts = datetime.fromtimestamp(
                             self.timestamps[bar_idx], tz=timezone.utc
                         ).isoformat()
-                        action_str = "BUY" if target_pos > position else "SELL"
+                        action_str = "BUY" if target_pos > old_position else "SELL"
                         trade_rows.append({
                             'timestamp': ts,
                             'bar_num': bar_idx,
