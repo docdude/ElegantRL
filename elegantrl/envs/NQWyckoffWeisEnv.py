@@ -179,7 +179,7 @@ class NQWyckoffWeisEnv:
         overstay_bars: int = 20,
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
-        pnl_norm: float = 500.0,
+        pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
         random_start: bool = True,
         feature_indices: list[int] | None = None,
@@ -214,7 +214,7 @@ class NQWyckoffWeisEnv:
         self.random_start = random_start
         self.max_episode_bars = max_step
 
-        # PnL normalisation – default $500 keeps pnl_delta ≈ O(shaping)
+        # PnL normalisation – default $2000 so 40pt 2-lot = 0.8 (no clip)
         self.pnl_norm = pnl_norm
 
         # ElegantRL metadata
@@ -562,7 +562,7 @@ class NQWyckoffWeisVecEnv:
         overstay_bars: int = 20,
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
-        pnl_norm: float = 500.0,
+        pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
         feature_indices: list[int] | None = None,
         gamma: float = 0.99,            # kept for ElegantRL Config compat
@@ -605,7 +605,7 @@ class NQWyckoffWeisVecEnv:
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
         self.reward_clip = reward_clip
-        self.pnl_norm = pnl_norm  # $500 default – keeps pnl_delta ≈ O(shaping)
+        self.pnl_norm = pnl_norm  # $2000 default – 40pt 2-lot = 0.8 (no clip)
         self.gamma = gamma
 
         # ── ElegantRL metadata ───────────────────────────────────────────
