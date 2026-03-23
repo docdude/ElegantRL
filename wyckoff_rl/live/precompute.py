@@ -305,43 +305,88 @@ class PrecomputedReplay:
                     equity_curve.append(initial_capital + total_pnl)
                     continue
 
-            # Execute
-            delta = int(round(target_pos - position))
-            if delta != 0:
-                pnl = 0.0
-                if position != 0:
-                    if ((position > 0 and delta < 0) or
-                            (position < 0 and delta > 0)):
-                        closed = min(abs(position), abs(delta))
+            # Execute — match training env behavior
+            if continuous:
+                # Training env uses fractional positions directly.
+                # Mark-to-market: PnL from holding old position during bar.
+                pos_change = abs(target_pos - position)
+                if pos_change > 1e-6:
+                    # Realize P&L on closing portion of old position
+                    pnl = 0.0
+                    if abs(position) > 1e-6:
                         pnl_pts = (price - entry_price) * (1 if position > 0 else -1)
-                        pnl = closed * pnl_pts * 20.0
-                        trade_pnls.append(pnl)
+                        # Closing fraction = overlap between old and new
+                        if (position > 0 and target_pos < position) or \
+                           (position < 0 and target_pos > position):
+                            closed_frac = min(abs(position),
+                                              abs(target_pos - position))
+                            # Scale to 1 contract ($20/pt)
+                            pnl = closed_frac * pnl_pts * 20.0
+                            trade_pnls.append(pnl)
 
-                position = position + delta
-                if position != 0:
-                    entry_price = price
-                n_trades += 1
-                total_pnl += pnl
-                cash += pnl / 20.0
+                    position = target_pos
+                    if abs(position) > 1e-6:
+                        entry_price = price
+                    else:
+                        entry_price = 0.0
+                    n_trades += 1
+                    total_pnl += pnl
+                    cash += pnl / 20.0
 
-                # Record trade row (matches old WyckoffTrader CSV format)
-                if trade_rows is not None:
-                    ts = datetime.fromtimestamp(
-                        self.timestamps[bar_idx], tz=timezone.utc
-                    ).isoformat()
-                    action_str = "BUY" if delta > 0 else "SELL"
-                    trade_rows.append({
-                        'timestamp': ts,
-                        'bar_num': bar_idx,
-                        'bar_close': price,
-                        'raw_action': raw_action,
-                        'action': action_str,
-                        'quantity': abs(delta),
-                        'position_after': position,
-                        'pnl_realized_usd': f"{pnl:+.2f}",
-                        'total_pnl_usd': f"{total_pnl:+.2f}",
-                        'equity': f"{initial_capital + total_pnl:.2f}",
-                    })
+                    if trade_rows is not None:
+                        ts = datetime.fromtimestamp(
+                            self.timestamps[bar_idx], tz=timezone.utc
+                        ).isoformat()
+                        action_str = "BUY" if target_pos > position else "SELL"
+                        trade_rows.append({
+                            'timestamp': ts,
+                            'bar_num': bar_idx,
+                            'bar_close': price,
+                            'raw_action': raw_action,
+                            'action': action_str,
+                            'quantity': f"{pos_change:.3f}",
+                            'position_after': f"{position:.3f}",
+                            'pnl_realized_usd': f"{pnl:+.2f}",
+                            'total_pnl_usd': f"{total_pnl:+.2f}",
+                            'equity': f"{initial_capital + total_pnl:.2f}",
+                        })
+            else:
+                # Binary mode: integer positions via int(round())
+                delta = int(round(target_pos - position))
+                if delta != 0:
+                    pnl = 0.0
+                    if position != 0:
+                        if ((position > 0 and delta < 0) or
+                                (position < 0 and delta > 0)):
+                            closed = min(abs(position), abs(delta))
+                            pnl_pts = (price - entry_price) * (1 if position > 0 else -1)
+                            pnl = closed * pnl_pts * 20.0
+                            trade_pnls.append(pnl)
+
+                    position = position + delta
+                    if position != 0:
+                        entry_price = price
+                    n_trades += 1
+                    total_pnl += pnl
+                    cash += pnl / 20.0
+
+                    if trade_rows is not None:
+                        ts = datetime.fromtimestamp(
+                            self.timestamps[bar_idx], tz=timezone.utc
+                        ).isoformat()
+                        action_str = "BUY" if delta > 0 else "SELL"
+                        trade_rows.append({
+                            'timestamp': ts,
+                            'bar_num': bar_idx,
+                            'bar_close': price,
+                            'raw_action': raw_action,
+                            'action': action_str,
+                            'quantity': abs(delta),
+                            'position_after': position,
+                            'pnl_realized_usd': f"{pnl:+.2f}",
+                            'total_pnl_usd': f"{total_pnl:+.2f}",
+                            'equity': f"{initial_capital + total_pnl:.2f}",
+                        })
 
             equity_curve.append(initial_capital + total_pnl)
 
