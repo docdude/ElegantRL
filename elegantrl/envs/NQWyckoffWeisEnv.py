@@ -179,6 +179,8 @@ class NQWyckoffWeisEnv:
         overstay_bars: int = 20,
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
+        pnl_norm: float = 500.0,
+        reward_clip: float = 2.0,
         random_start: bool = True,
         feature_indices: list[int] | None = None,
         **kwargs,
@@ -208,11 +210,12 @@ class NQWyckoffWeisEnv:
         self.overstay_bars = overstay_bars
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
+        self.reward_clip = reward_clip
         self.random_start = random_start
         self.max_episode_bars = max_step
 
-        # PnL normalisation (10 ticks × tick_value = $50)
-        self.pnl_norm = 10.0 * tick_value
+        # PnL normalisation – default $500 keeps pnl_delta ≈ O(shaping)
+        self.pnl_norm = pnl_norm
 
         # ElegantRL metadata
         self.state_dim = self.n_features + N_POSITION_FEATURES
@@ -289,6 +292,8 @@ class NQWyckoffWeisEnv:
 
         reward = (pnl_delta + entry_bonus + mgmt_bonus
                   - penalty - regime_penalty) * self.reward_scale
+        if self.reward_clip > 0:
+            reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
 
         # 5) Done
         truncated = (self._t >= self._end) or (self._step >= self.max_episode_bars)
@@ -557,6 +562,8 @@ class NQWyckoffWeisVecEnv:
         overstay_bars: int = 20,
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
+        pnl_norm: float = 500.0,
+        reward_clip: float = 2.0,
         feature_indices: list[int] | None = None,
         gamma: float = 0.99,            # kept for ElegantRL Config compat
         reward_mode: str = "pnl",       # kept for Config compat
@@ -597,7 +604,8 @@ class NQWyckoffWeisVecEnv:
         self.overstay_bars = overstay_bars
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
-        self.pnl_norm = 10.0 * tick_value  # $50 normalisation
+        self.reward_clip = reward_clip
+        self.pnl_norm = pnl_norm  # $500 default – keeps pnl_delta ≈ O(shaping)
         self.gamma = gamma
 
         # ── ElegantRL metadata ───────────────────────────────────────────
@@ -745,6 +753,8 @@ class NQWyckoffWeisVecEnv:
 
         reward = (pnl_delta + entry_bonus + mgmt_bonus
                   - penalty - regime_penalty) * self.reward_scale
+        if self.reward_clip > 0:
+            reward = th.clamp(reward, -self.reward_clip, self.reward_clip)
 
         # 6) Episode management
         done = (self.step_count >= self._episode_len) | (self.day >= self.max_step)
