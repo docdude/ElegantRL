@@ -223,10 +223,13 @@ class NQWyckoffWeisEnv:
         # PnL normalisation – default $2000 so 40pt 2-lot = 0.8 (no clip)
         self.pnl_norm = pnl_norm
 
-        # Drift detrending: remove directional bias from dense PnL reward
-        # so the agent can't profit from unconditional long/short exposure
-        bar_changes = np.diff(self.close_ary.flatten())
-        self.drift_per_bar = float(np.mean(bar_changes)) if len(bar_changes) > 0 else 0.0
+        # Local drift detrending: per-bar rolling mean of prior price changes
+        close_flat = self.close_ary.flatten()
+        bar_changes = np.diff(close_flat, prepend=close_flat[0])
+        import pandas as pd
+        self.drift_per_bar = (pd.Series(bar_changes)
+                             .rolling(50, min_periods=1).mean()
+                             .shift(1).fillna(0.0).values)
 
         # ElegantRL metadata
         self.state_dim = self.n_features + N_POSITION_FEATURES
@@ -314,7 +317,7 @@ class NQWyckoffWeisEnv:
         curr_price = float(self.close_ary[self._t])
         holding_pnl = 0.0
         if post_side != 0 and post_size > 0:
-            detrended_change = (curr_price - prev_price) - self.drift_per_bar
+            detrended_change = (curr_price - prev_price) - self.drift_per_bar[self._t]
             ticks = (detrended_change / self.tick_size) * post_side
             holding_pnl = ticks * self.tick_value * post_size
         pnl_delta = holding_pnl / self.pnl_norm
@@ -704,10 +707,16 @@ class NQWyckoffWeisVecEnv:
         self.bar_range = bar_range  # range bar size for ATR normalization
         self.gamma = gamma
 
-        # Drift detrending: remove directional bias from dense PnL reward
-        bar_changes = np.diff(close_ary.flatten())
-        drift = float(np.mean(bar_changes)) if len(bar_changes) > 0 else 0.0
-        self.drift_per_bar = th.tensor(drift, dtype=th.float32, device=self.device)
+        # Local drift detrending: per-bar rolling mean of prior price changes.
+        # Removes LOCAL trend bias so passive long/short → ~0 expected reward.
+        # shift(1) avoids lookahead: drift[t] uses bars [t-50, t-1] only.
+        close_flat = close_ary.flatten()
+        bar_changes = np.diff(close_flat, prepend=close_flat[0])
+        import pandas as pd
+        rolling_drift = (pd.Series(bar_changes)
+                         .rolling(50, min_periods=1).mean()
+                         .shift(1).fillna(0.0).values)
+        self.drift_per_bar = th.tensor(rolling_drift, dtype=th.float32, device=self.device)
 
         # ── ElegantRL metadata ───────────────────────────────────────────
         self.env_name = "NQWyckoffWeisVecEnv-v1"
@@ -789,7 +798,9 @@ class NQWyckoffWeisVecEnv:
 
         # Startup banner — confirms new code is loaded
         print(
-            f"[VecEnv] drift_per_bar={self.drift_per_bar.item():.4f}pts "
+            f"[VecEnv] drift_per_bar=local_rolling_50 "
+            f"drift_mean={self.drift_per_bar.mean().item():.4f}pts "
+            f"drift_std={self.drift_per_bar.std().item():.4f}pts "
             f"carry_cost={self.carry_cost} idle_penalty={self.idle_penalty} "
             f"entry_bonus={self.entry_bonus_scale} vesting_bars={self.vesting_bars} "
             f"regime_penalty={self.regime_penalty_scale} "
@@ -909,8 +920,8 @@ class NQWyckoffWeisVecEnv:
             prev_price,
         )
         price_change = curr_price - baseline
-        # Detrend: subtract average drift so unconditional long/short → 0 expected reward
-        detrended_change = price_change - self.drift_per_bar
+        # Detrend: subtract local rolling drift so passive directional → ~0 reward
+        detrended_change = price_change - self.drift_per_bar[self.day]
         ticks = (detrended_change / self.tick_size) * post_side
         holding_pnl = ticks * self.tick_value * post_size
         pnl_delta = holding_pnl / self.pnl_norm
