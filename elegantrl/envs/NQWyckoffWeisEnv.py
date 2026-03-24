@@ -180,6 +180,7 @@ class NQWyckoffWeisEnv:
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
         carry_cost: float = 0.0,
+        vesting_bars: int = 10,
         pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
         bar_range: float = 40.0,
@@ -213,6 +214,7 @@ class NQWyckoffWeisEnv:
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
         self.carry_cost = carry_cost
+        self.vesting_bars = vesting_bars
         self.reward_clip = reward_clip
         self.random_start = random_start
         self.bar_range = bar_range
@@ -249,6 +251,9 @@ class NQWyckoffWeisEnv:
         self._realized: float = 0.0
         self._mfe: float = 0.0
         self._mae: float = 0.0
+        # Entry bonus vesting
+        self._vesting_drip: float = 0.0
+        self._vesting_remaining: int = 0
         # Bookkeeping
         self.cumulative_returns = 0.0
         self.total_trades = 0
@@ -275,6 +280,8 @@ class NQWyckoffWeisEnv:
         self._realized = 0.0
         self._mfe = 0.0
         self._mae = 0.0
+        self._vesting_drip = 0.0
+        self._vesting_remaining = 0
         self.total_trades = 0
         self._action_counts = [0] * N_ACTIONS
         return self._get_obs(), {}
@@ -312,14 +319,27 @@ class NQWyckoffWeisEnv:
             holding_pnl = ticks * self.tick_value * post_size
         pnl_delta = holding_pnl / self.pnl_norm
 
-        entry_bonus = self._entry_bonus(action)
+        # Entry bonus: deferred until vesting_bars of holding
+        # On entry with valid signal, store the bonus; pay it only after
+        # the agent has held for vesting_bars (forfeit if exiting early)
+        raw_entry_bonus = self._entry_bonus(action)
+        if raw_entry_bonus > 0 and self.vesting_bars > 0:
+            self._vesting_drip = raw_entry_bonus  # deferred amount
+            self._vesting_remaining = self.vesting_bars
+        vesting_bonus = 0.0
+        if self._vesting_remaining > 0:
+            self._vesting_remaining -= 1
+            if self._vesting_remaining == 0:  # vesting complete → pay out
+                vesting_bonus = self._vesting_drip
+                self._vesting_drip = 0.0
+
         mgmt_bonus = self._management_bonus(action)
         regime_penalty = self._regime_mismatch_penalty(action)
 
         # Carry cost: per-bar cost of being positioned (encourages selectivity)
         carry = self.carry_cost if (post_side != 0 and post_size > 0) else 0.0
 
-        reward = (pnl_delta + entry_bonus + mgmt_bonus
+        reward = (pnl_delta + vesting_bonus + mgmt_bonus
                   - penalty - regime_penalty - carry) * self.reward_scale
         if self.reward_clip > 0:
             reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
@@ -434,6 +454,8 @@ class NQWyckoffWeisEnv:
             self._bars_in_trade = 0
             self._mfe = 0.0
             self._mae = 0.0
+            self._vesting_drip = 0.0
+            self._vesting_remaining = 0
 
     def _close(self, price: float):
         pnl = self._compute_pnl(price)
@@ -444,6 +466,8 @@ class NQWyckoffWeisEnv:
         self._bars_in_trade = 0
         self._mfe = 0.0
         self._mae = 0.0
+        self._vesting_drip = 0.0
+        self._vesting_remaining = 0
         self.total_trades += 1
 
     def _compute_pnl(self, price: float) -> float:
@@ -628,6 +652,7 @@ class NQWyckoffWeisVecEnv:
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
         carry_cost: float = 0.0,
+        vesting_bars: int = 10,
         pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
         bar_range: float = 40.0,
@@ -673,6 +698,7 @@ class NQWyckoffWeisVecEnv:
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
         self.carry_cost = carry_cost
+        self.vesting_bars = vesting_bars
         self.reward_clip = reward_clip
         self.pnl_norm = pnl_norm  # $2000 default – 40pt 2-lot = 0.8 (no clip)
         self.bar_range = bar_range  # range bar size for ATR normalization
@@ -721,6 +747,9 @@ class NQWyckoffWeisVecEnv:
         self.realized_pnl = None    # (ne,) float ($)
         self.mfe = None             # (ne,) float ($)
         self.mae = None             # (ne,) float ($)
+        # Entry bonus vesting (deferred payout after holding vesting_bars)
+        self.vesting_amount = None    # (ne,) float — deferred bonus amount
+        self.vesting_remaining = None # (ne,) long — bars until payout
         # Bookkeeping
         self.cumulative_returns = None
         self.total_trades = None
@@ -762,7 +791,8 @@ class NQWyckoffWeisVecEnv:
         print(
             f"[VecEnv] drift_per_bar={self.drift_per_bar.item():.4f}pts "
             f"carry_cost={self.carry_cost} idle_penalty={self.idle_penalty} "
-            f"entry_bonus={self.entry_bonus_scale} regime_penalty={self.regime_penalty_scale} "
+            f"entry_bonus={self.entry_bonus_scale} vesting_bars={self.vesting_bars} "
+            f"regime_penalty={self.regime_penalty_scale} "
             f"bars={self.close_price.shape[0]} num_envs={num_envs}",
             flush=True,
         )
@@ -781,6 +811,8 @@ class NQWyckoffWeisVecEnv:
         self.realized_pnl = th.zeros(ne, dtype=th.float32, device=dev)
         self.mfe = th.zeros(ne, dtype=th.float32, device=dev)
         self.mae = th.zeros(ne, dtype=th.float32, device=dev)
+        self.vesting_amount = th.zeros(ne, dtype=th.float32, device=dev)
+        self.vesting_remaining = th.zeros(ne, dtype=th.long, device=dev)
         self.total_trades = th.zeros(ne, dtype=th.long, device=dev)
         self.cumulative_returns = [0.0] * ne
 
@@ -883,7 +915,28 @@ class NQWyckoffWeisVecEnv:
         holding_pnl = ticks * self.tick_value * post_size
         pnl_delta = holding_pnl / self.pnl_norm
 
-        entry_bonus = self._compute_entry_bonus(action)
+        # Entry bonus: deferred until vesting_bars of holding
+        # On entry with valid signal, store the bonus; pay it only after
+        # the agent has held for vesting_bars (forfeit if exiting early)
+        raw_entry_bonus = self._compute_entry_bonus(action)
+        has_new_bonus = raw_entry_bonus > 0
+        if has_new_bonus.any():
+            self.vesting_amount = th.where(has_new_bonus, raw_entry_bonus, self.vesting_amount)
+            self.vesting_remaining = th.where(has_new_bonus,
+                                              th.full_like(self.vesting_remaining, self.vesting_bars),
+                                              self.vesting_remaining)
+        # Tick down and pay when vesting completes
+        still_vesting = self.vesting_remaining > 0
+        self.vesting_remaining = th.where(still_vesting,
+                                          self.vesting_remaining - 1,
+                                          self.vesting_remaining)
+        vesting_done = still_vesting & (self.vesting_remaining == 0)
+        entry_bonus = th.where(vesting_done, self.vesting_amount,
+                               th.zeros_like(self.vesting_amount))
+        self.vesting_amount = th.where(vesting_done,
+                                       th.zeros_like(self.vesting_amount),
+                                       self.vesting_amount)
+
         mgmt_bonus = self._compute_management_bonus(action)
         regime_penalty = self._compute_regime_mismatch_penalty(action)
 
@@ -1011,6 +1064,8 @@ class NQWyckoffWeisVecEnv:
         # Clear position if fully reduced
         self.pos_side = th.where(goes_flat, th.zeros_like(self.pos_side), self.pos_side)
         self.entry_price = th.where(goes_flat, th.zeros_like(self.entry_price), self.entry_price)
+        self.vesting_amount = th.where(goes_flat, th.zeros_like(self.vesting_amount), self.vesting_amount)
+        self.vesting_remaining = th.where(goes_flat, th.zeros_like(self.vesting_remaining), self.vesting_remaining)
         self.total_trades = th.where(valid_reduce, self.total_trades + 1, self.total_trades)
 
         # ── EXIT ──
@@ -1027,6 +1082,8 @@ class NQWyckoffWeisVecEnv:
         self.pos_side = th.where(valid_exit, th.zeros_like(self.pos_side), self.pos_side)
         self.pos_size = th.where(valid_exit, th.zeros_like(self.pos_size), self.pos_size)
         self.entry_price = th.where(valid_exit, th.zeros_like(self.entry_price), self.entry_price)
+        self.vesting_amount = th.where(valid_exit, th.zeros_like(self.vesting_amount), self.vesting_amount)
+        self.vesting_remaining = th.where(valid_exit, th.zeros_like(self.vesting_remaining), self.vesting_remaining)
         self.total_trades = th.where(valid_exit, self.total_trades + 1, self.total_trades)
 
         # ── Penalties ──
@@ -1210,6 +1267,8 @@ class NQWyckoffWeisVecEnv:
         self.realized_pnl[mask] = 0.0
         self.mfe[mask] = 0.0
         self.mae[mask] = 0.0
+        self.vesting_amount[mask] = 0.0
+        self.vesting_remaining[mask] = 0
         self.total_trades[mask] = 0
 
     # ─── Diagnostics ──────────────────────────────────────────────────────
