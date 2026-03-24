@@ -91,21 +91,29 @@ def discover_checkpoints(split_dir: str) -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def compute_nq_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
-                        initial_amount: float) -> dict:
+                        initial_amount: float,
+                        futures: bool = False) -> dict:
     """Compute NQ buy-and-hold baseline over test indices.
 
+    When futures=True, uses additive point-based accounting (1 contract)
+    so returns are comparable to the discrete NQ env.
     Returns dict with 'values' (account curve) and 'return_pct'.
     """
     prices = close_ary[test_indices].ravel()
-    # Normalized to start at initial_amount
-    bh_values = prices / prices[0] * initial_amount
+    if futures:
+        # Additive: account = initial + cumulative point change (1 lot)
+        bh_values = initial_amount + (prices - prices[0])
+    else:
+        # Multiplicative: stock-style percentage returns
+        bh_values = prices / prices[0] * initial_amount
     bh_return = (bh_values[-1] / initial_amount - 1) * 100
     return {'values': bh_values, 'return_pct': bh_return}
 
 
 def compute_sma_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
                          initial_amount: float, cost_per_trade: float = 0.5,
-                         fast: int = 20, slow: int = 50) -> dict:
+                         fast: int = 20, slow: int = 50,
+                         futures: bool = False) -> dict:
     """SMA crossover trend-following baseline.
 
     Long when fast SMA > slow SMA, short when fast < slow.
@@ -121,38 +129,52 @@ def compute_sma_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
 
     test_prices = prices[test_indices]
     test_signal = signal[test_indices]
-    returns = np.diff(test_prices) / test_prices[:-1]
-    # Signal from previous bar determines current bar's return
-    pos_returns = test_signal[:-1] * returns
 
-    # Subtract transaction costs on position changes
-    trades = np.abs(np.diff(test_signal))
-    cost_per_point = cost_per_trade / test_prices[1:]
-    pos_returns -= trades * cost_per_point
+    if futures:
+        # Additive: PnL = position × price_change (in points)
+        price_changes = np.diff(test_prices)
+        pnl_per_bar = test_signal[:-1] * price_changes
+        # Transaction cost in points on position changes
+        trades = np.abs(np.diff(test_signal))
+        pnl_per_bar -= trades * cost_per_trade
+        values = initial_amount + np.concatenate([[0.0], np.cumsum(pnl_per_bar)])
+    else:
+        returns = np.diff(test_prices) / test_prices[:-1]
+        pos_returns = test_signal[:-1] * returns
+        trades = np.abs(np.diff(test_signal))
+        cost_per_point = cost_per_trade / test_prices[1:]
+        pos_returns -= trades * cost_per_point
+        values = initial_amount * np.cumprod(np.concatenate([[1.0], 1.0 + pos_returns]))
 
-    values = initial_amount * np.cumprod(np.concatenate([[1.0], 1.0 + pos_returns]))
     ret_pct = (values[-1] / initial_amount - 1) * 100
     return {'values': values, 'return_pct': ret_pct}
 
 
 def compute_random_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
                             initial_amount: float, cost_per_trade: float = 0.5,
-                            n_trials: int = 100, seed: int = 42) -> dict:
+                            n_trials: int = 100, seed: int = 42,
+                            futures: bool = False) -> dict:
     """Average equity curve over N random {-1, 0, +1} position sequences."""
     rng = np.random.RandomState(seed)
     prices = close_ary.ravel()[test_indices]
-    returns = np.diff(prices) / prices[:-1]
-    n = len(returns)
+    n = len(prices) - 1
 
     cum_values = np.zeros(n + 1)
     for _ in range(n_trials):
         positions = rng.choice([-1, 0, 1], size=n)
-        pos_returns = positions * returns
         trades = np.abs(np.diff(np.concatenate([[0], positions])))
-        cost_per_point = cost_per_trade / prices[1:]
-        pos_returns -= trades * cost_per_point
-        cum_values += initial_amount * np.cumprod(
-            np.concatenate([[1.0], 1.0 + pos_returns]))
+        if futures:
+            price_changes = np.diff(prices)
+            pnl_per_bar = positions * price_changes
+            pnl_per_bar -= trades * cost_per_trade
+            cum_values += initial_amount + np.concatenate([[0.0], np.cumsum(pnl_per_bar)])
+        else:
+            returns = np.diff(prices) / prices[:-1]
+            pos_returns = positions * returns
+            cost_per_point = cost_per_trade / prices[1:]
+            pos_returns -= trades * cost_per_point
+            cum_values += initial_amount * np.cumprod(
+                np.concatenate([[1.0], 1.0 + pos_returns]))
     cum_values /= n_trials
 
     ret_pct = (cum_values[-1] / initial_amount - 1) * 100
@@ -161,19 +183,27 @@ def compute_random_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
 
 def compute_oracle_baseline(close_ary: np.ndarray, test_indices: np.ndarray,
                             initial_amount: float,
-                            cost_per_trade: float = 0.5) -> dict:
+                            cost_per_trade: float = 0.5,
+                            futures: bool = False) -> dict:
     """Perfect-foresight oracle: always takes the optimal position."""
     prices = close_ary.ravel()[test_indices]
-    returns = np.diff(prices) / prices[:-1]
 
     # Oracle goes long if next return > 0, short if < 0, flat if ~0
-    oracle_pos = np.sign(returns)
-    pos_returns = oracle_pos * returns  # always positive
+    price_changes = np.diff(prices)
+    oracle_pos = np.sign(price_changes)
     trades = np.abs(np.diff(np.concatenate([[0], oracle_pos])))
-    cost_per_point = cost_per_trade / prices[1:]
-    pos_returns -= trades * cost_per_point
 
-    values = initial_amount * np.cumprod(np.concatenate([[1.0], 1.0 + pos_returns]))
+    if futures:
+        pnl_per_bar = oracle_pos * price_changes  # always positive
+        pnl_per_bar -= trades * cost_per_trade
+        values = initial_amount + np.concatenate([[0.0], np.cumsum(pnl_per_bar)])
+    else:
+        returns = price_changes / prices[:-1]
+        pos_returns = oracle_pos * returns
+        cost_per_point = cost_per_trade / prices[1:]
+        pos_returns -= trades * cost_per_point
+        values = initial_amount * np.cumprod(np.concatenate([[1.0], 1.0 + pos_returns]))
+
     ret_pct = (values[-1] / initial_amount - 1) * 100
     return {'values': values, 'return_pct': ret_pct}
 
@@ -363,11 +393,11 @@ def evaluate_split(
     test_idx = np.arange(n_test)
     cost = env_params.get('cost_per_trade', 0.5)
 
-    # Compute all baselines
-    baseline = compute_nq_baseline(test_close, test_idx, initial_amount)
-    sma_baseline = compute_sma_baseline(test_close, test_idx, initial_amount, cost)
-    random_baseline = compute_random_baseline(test_close, test_idx, initial_amount, cost)
-    oracle_baseline = compute_oracle_baseline(test_close, test_idx, initial_amount, cost)
+    # Compute all baselines (futures=True for discrete NQ env)
+    baseline = compute_nq_baseline(test_close, test_idx, initial_amount, futures=discrete)
+    sma_baseline = compute_sma_baseline(test_close, test_idx, initial_amount, cost, futures=discrete)
+    random_baseline = compute_random_baseline(test_close, test_idx, initial_amount, cost, futures=discrete)
+    oracle_baseline = compute_oracle_baseline(test_close, test_idx, initial_amount, cost, futures=discrete)
     baselines = {
         'B&H': baseline,
         'SMA 20/50': sma_baseline,
