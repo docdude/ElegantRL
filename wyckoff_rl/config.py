@@ -67,7 +67,7 @@ DEFAULT_ENV_PARAMS = {
     "cost_per_trade": 0.5,          # points per side (legacy continuous env)
     "reward_mode": "pnl",           # "pnl", "log_ret", "sharpe", "sortino"
     "reward_scale": 1.0,            # NQ discrete env handles its own scaling
-    "num_envs": 256,                # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
+    "num_envs": 2048,               # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
     "episode_len": 1024,            # sub-episode length for PPO (~7 sub-episodes in 7.6K bars)
     "window_size": WINDOW_SIZE,     # sliding window of bars for temporal context (legacy continuous)
     "feature_indices": SELECTED_INDICES,  # column indices into 61-feature tech_ary (legacy continuous)

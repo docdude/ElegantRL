@@ -80,24 +80,24 @@ ENV_FEATURE_INDICES = [
     29,  # wave_vol_trend_up    — up-wave volume trend
     30,  # wave_vol_trend_down  — down-wave volume trend
     34,  # large_wave_score     — climactic-volume flag
-    35,  # wave_effort_result_raw — absolute wave vol/displacement
-    36,  # wave_time_norm       — wave calendar duration (normalized)
-    37,  # wave_velocity_norm   — wave displacement per second
+    58,  # wave_effort_result_raw — absolute wave vol/displacement
+    59,  # wave_time_norm       — wave calendar duration (normalized)
+    60,  # wave_velocity_norm   — wave displacement per second
     # ── Wyckoff Events (6) ──
-    38,  # spring_score
-    39,  # upthrust_score
-    40,  # sc_score             — selling climax
-    41,  # bc_score             — buying climax
-    42,  # absorption_score
-    44,  # stopping_action_score
+    35,  # spring_score
+    36,  # upthrust_score
+    37,  # sc_score             — selling climax
+    38,  # bc_score             — buying climax
+    39,  # absorption_score
+    41,  # stopping_action_score
     # ── Range / Phase Context (7) ──
-    51,  # pct_in_range         — position inside trading range
-    52,  # range_width_norm     — range size (vol proxy)
-    53,  # bars_in_range        — time in current range
-    56,  # phase_accum_score    — accumulation probability
-    57,  # phase_markup_score   — markup probability
-    58,  # phase_distrib_score  — distribution probability
-    59,  # phase_markdown_score — markdown probability
+    48,  # pct_in_range         — position inside trading range
+    49,  # range_width_norm     — range size (vol proxy)
+    50,  # bars_in_range        — time in current range
+    53,  # phase_accum_score    — accumulation probability
+    54,  # phase_markup_score   — markup probability
+    55,  # phase_distrib_score  — distribution probability
+    56,  # phase_markdown_score — markdown probability
 ]
 
 N_ENV_FEATURES = len(ENV_FEATURE_INDICES)   # 38
@@ -107,18 +107,18 @@ N_POSITION_FEATURES = 8                     # side, size, entry_dist, ...
 _EFI_LOOKUP = {col: i for i, col in enumerate(ENV_FEATURE_INDICES)}
 
 # Event column offsets (inside the 38-feature selected vector)
-COL_SPRING = _EFI_LOOKUP[38]
-COL_UPTHRUST = _EFI_LOOKUP[39]
-COL_SC = _EFI_LOOKUP[40]
-COL_BC = _EFI_LOOKUP[41]
-COL_ABSORPTION = _EFI_LOOKUP[42]
-COL_STOPPING = _EFI_LOOKUP[44]
+COL_SPRING = _EFI_LOOKUP[35]
+COL_UPTHRUST = _EFI_LOOKUP[36]
+COL_SC = _EFI_LOOKUP[37]
+COL_BC = _EFI_LOOKUP[38]
+COL_ABSORPTION = _EFI_LOOKUP[39]
+COL_STOPPING = _EFI_LOOKUP[41]
 
 # Phase column offsets
-COL_PHASE_ACCUM = _EFI_LOOKUP[56]
-COL_PHASE_MARKUP = _EFI_LOOKUP[57]
-COL_PHASE_DISTRIB = _EFI_LOOKUP[58]
-COL_PHASE_MARKDOWN = _EFI_LOOKUP[59]
+COL_PHASE_ACCUM = _EFI_LOOKUP[53]
+COL_PHASE_MARKUP = _EFI_LOOKUP[54]
+COL_PHASE_DISTRIB = _EFI_LOOKUP[55]
+COL_PHASE_MARKDOWN = _EFI_LOOKUP[56]
 
 # Wave direction column offset
 COL_WAVE_DIR = _EFI_LOOKUP[15]
@@ -149,7 +149,7 @@ class NQWyckoffWeisEnv:
     Single-instance Wyckoff/Weis NQ futures trading environment.
 
     Observation (state_dim = 46):
-      [35 selected features from tech_ary | 8 position-state features]
+      [38 selected features from tech_ary | 8 position-state features]
 
     Action (discrete, 6):
       hold | enter_long | enter_short | add | reduce | exit
@@ -270,24 +270,35 @@ class NQWyckoffWeisEnv:
 
     def step(self, action: int):
         action = int(action)
-        equity_before = self._realized + self._unrealized
+
+        # Snapshot pre-action price for dense reward
+        prev_price = float(self.close_ary[self._t])
 
         # 1) Execute action at current bar close
         penalty = self._execute(action)
 
-        # 2) Advance bar
+        # 2) Snapshot post-action position for correct credit assignment
+        #    (entry actions now get PnL credit on the bar they enter)
+        post_side = self._side
+        post_size = self._size
+
+        # 3) Advance bar
         self._t += 1
         self._step += 1
 
-        # 3) Mark-to-market
+        # 4) Mark-to-market
         self._mark_to_market()
 
-        # 4) Reward
-        equity_after = self._realized + self._unrealized
-        pnl_delta = (equity_after - equity_before) / self.pnl_norm
+        # 5) Reward — dense: position_exposure × price_change
+        curr_price = float(self.close_ary[self._t])
+        holding_pnl = 0.0
+        if post_side != 0 and post_size > 0:
+            ticks = ((curr_price - prev_price) / self.tick_size) * post_side
+            holding_pnl = ticks * self.tick_value * post_size
+        pnl_delta = holding_pnl / self.pnl_norm
 
         entry_bonus = self._entry_bonus(action)
-        mgmt_bonus = self._management_bonus()
+        mgmt_bonus = self._management_bonus(action)
         regime_penalty = self._regime_mismatch_penalty(action)
 
         reward = (pnl_delta + entry_bonus + mgmt_bonus
@@ -295,7 +306,7 @@ class NQWyckoffWeisEnv:
         if self.reward_clip > 0:
             reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
 
-        # 5) Done
+        # 6) Done
         truncated = (self._t >= self._end) or (self._step >= self.max_episode_bars)
         terminated = False
 
@@ -397,6 +408,9 @@ class NQWyckoffWeisEnv:
             self._side = 0
             self._size = 0.0
             self._entry_price = 0.0
+            self._bars_in_trade = 0
+            self._mfe = 0.0
+            self._mae = 0.0
 
     def _close(self, price: float):
         pnl = self._compute_pnl(price)
@@ -404,6 +418,9 @@ class NQWyckoffWeisEnv:
         self._side = 0
         self._size = 0.0
         self._entry_price = 0.0
+        self._bars_in_trade = 0
+        self._mfe = 0.0
+        self._mae = 0.0
 
     def _compute_pnl(self, price: float) -> float:
         ticks = ((price - self._entry_price) / self.tick_size) * self._side
@@ -430,30 +447,43 @@ class NQWyckoffWeisEnv:
         scale = self.entry_bonus_scale
 
         if action == ACTION_ENTER_LONG:
-            if feats[38] > thr:           # spring_score
+            if feats[35] > thr:           # spring_score
                 bonus += scale
-            if feats[42] > thr and feats[15] > 0:  # absorption + up-wave
+            if feats[39] > thr and feats[15] > 0:  # absorption + up-wave
                 bonus += scale * 0.6
-            if feats[44] > thr and feats[15] > 0:  # stopping_action + up-wave
+            if feats[41] > thr and feats[15] > 0:  # stopping_action + up-wave
                 bonus += scale * 0.4
 
         elif action == ACTION_ENTER_SHORT:
-            if feats[39] > thr:           # upthrust_score
+            if feats[36] > thr:           # upthrust_score
                 bonus += scale
-            if feats[42] > thr and feats[15] < 0:  # absorption + down-wave
+            if feats[39] > thr and feats[15] < 0:  # absorption + down-wave
                 bonus += scale * 0.6
-            if feats[44] > thr and feats[15] < 0:  # stopping_action + down-wave
+            if feats[41] > thr and feats[15] < 0:  # stopping_action + down-wave
                 bonus += scale * 0.4
 
-        return bonus
+        return min(bonus, scale)  # cap stacking to 1× scale
 
     # ─── Management bonus ─────────────────────────────────────────────────
 
-    def _management_bonus(self) -> float:
+    def _has_entry_signal(self) -> bool:
+        """Check if any Wyckoff event signal is active on the current bar."""
+        feats = self.tech_ary[self._t]
+        thr = self.event_threshold
+        return bool(
+            feats[35] > thr or   # spring
+            feats[36] > thr or   # upthrust
+            feats[39] > thr or   # absorption
+            feats[41] > thr      # stopping action
+        )
+
+    def _management_bonus(self, action: int) -> float:
         """Reward holding winners, penalise overstaying in losers.
-        When flat, apply idle penalty to discourage all-HOLD collapse."""
+        When flat, penalise only explicit HOLD when a setup exists."""
         if self._side == 0:
-            return -self.idle_penalty
+            if action == ACTION_HOLD and self._has_entry_signal():
+                return -self.idle_penalty
+            return 0.0
         if self._unrealized > 0:
             return self.mgmt_bonus_scale
         if self._unrealized < 0 and self._bars_in_trade > self.overstay_bars:
@@ -466,8 +496,8 @@ class NQWyckoffWeisEnv:
         """Penalise entering against the dominant Wyckoff phase."""
         feats = self.tech_ary[self._t]
         # Phase scores from 61-feature tech_ary
-        bullish = max(feats[56], feats[57])   # accum / markup
-        bearish = max(feats[58], feats[59])   # distrib / markdown
+        bullish = max(feats[53], feats[54])   # accum / markup
+        bearish = max(feats[55], feats[56])   # distrib / markdown
         scale = self.regime_penalty_scale
 
         if action == ACTION_ENTER_SHORT and bullish > 0.7:
@@ -517,7 +547,7 @@ class NQWyckoffWeisVecEnv:
     with per-env bar tracking and auto-reset.
 
     Observation  (state_dim = 46):
-      [35 selected features | 8 position features]
+      [38 selected features | 8 position features]
 
     Action (discrete, 6):
       hold | enter_long | enter_short | add | reduce | exit
@@ -623,17 +653,17 @@ class NQWyckoffWeisVecEnv:
 
         # ── Event feature column indices into *full* tech_ary (61 cols) ──
         # Used for reward shaping — index directly into self.tech_factor
-        # NOTE: 3 wave features inserted at 35-37 shifted Block 3+ by +3
-        self._col_spring = 38
-        self._col_upthrust = 39
-        self._col_absorption = 42
-        self._col_stopping = 44
+        # NOTE: 3 wave features appended at 58-60, original 58 indices preserved
+        self._col_spring = 35
+        self._col_upthrust = 36
+        self._col_absorption = 39
+        self._col_stopping = 41
         self._col_wave_dir = 15
         # Phase columns for regime mismatch penalty
-        self._col_phase_accum = 56
-        self._col_phase_markup = 57
-        self._col_phase_distrib = 58
-        self._col_phase_markdown = 59
+        self._col_phase_accum = 53
+        self._col_phase_markup = 54
+        self._col_phase_distrib = 55
+        self._col_phase_markdown = 56
 
         # ── Per-env state (allocated in reset) ───────────────────────────
         self.day = None             # (ne,) long — bar index
@@ -649,6 +679,14 @@ class NQWyckoffWeisVecEnv:
         # Bookkeeping
         self.cumulative_returns = None
         self.total_trades = None
+
+        # Reward component diagnostics (running sums for logging)
+        self._diag_pnl = 0.0
+        self._diag_entry = 0.0
+        self._diag_mgmt = 0.0
+        self._diag_penalty = 0.0
+        self._diag_regime = 0.0
+        self._diag_steps = 0
 
     # ─── Reset ────────────────────────────────────────────────────────────
 
@@ -730,25 +768,33 @@ class NQWyckoffWeisVecEnv:
             action = action[:, 0]
         action = action.long()
 
-        # 1) Snapshot equity before
-        equity_before = self.realized_pnl + self.unrealized_pnl
+        # 1) Snapshot pre-action price for dense reward
+        prev_price = self.close_price[self.day]
 
         # 2) Execute discrete actions
         penalty = self._execute_actions(action)
 
-        # 3) Advance bar
+        # 3) Snapshot post-action position for correct credit assignment
+        #    (entry actions now get PnL credit on the bar they enter)
+        post_side = self.pos_side.clone()
+        post_size = self.pos_size.clone()
+
+        # 4) Advance bar
         self.day = th.clamp(self.day + 1, max=self.max_step)
         self.step_count += 1
 
-        # 4) Mark-to-market
+        # 5) Mark-to-market
         self._mark_to_market()
 
-        # 5) Reward
-        equity_after = self.realized_pnl + self.unrealized_pnl
-        pnl_delta = (equity_after - equity_before) / self.pnl_norm
+        # 6) Reward — dense: position_exposure × price_change
+        curr_price = self.close_price[self.day]
+        price_change = curr_price - prev_price
+        ticks = (price_change / self.tick_size) * post_side
+        holding_pnl = ticks * self.tick_value * post_size
+        pnl_delta = holding_pnl / self.pnl_norm
 
         entry_bonus = self._compute_entry_bonus(action)
-        mgmt_bonus = self._compute_management_bonus()
+        mgmt_bonus = self._compute_management_bonus(action)
         regime_penalty = self._compute_regime_mismatch_penalty(action)
 
         reward = (pnl_delta + entry_bonus + mgmt_bonus
@@ -756,7 +802,25 @@ class NQWyckoffWeisVecEnv:
         if self.reward_clip > 0:
             reward = th.clamp(reward, -self.reward_clip, self.reward_clip)
 
-        # 6) Episode management
+        # Reward component diagnostics
+        self._diag_pnl += pnl_delta.abs().mean().item()
+        self._diag_entry += entry_bonus.abs().mean().item()
+        self._diag_mgmt += mgmt_bonus.abs().mean().item()
+        self._diag_penalty += penalty.abs().mean().item()
+        self._diag_regime += regime_penalty.abs().mean().item()
+        self._diag_steps += 1
+        if self._diag_steps % 5000 == 0:
+            n = self._diag_steps
+            logger.info(
+                f"[RewardDiag] steps={n} "
+                f"|pnl|={self._diag_pnl/n:.4f} "
+                f"|entry|={self._diag_entry/n:.4f} "
+                f"|mgmt|={self._diag_mgmt/n:.4f} "
+                f"|pen|={self._diag_penalty/n:.4f} "
+                f"|regime|={self._diag_regime/n:.4f}"
+            )
+
+        # 7) Episode management
         done = (self.step_count >= self._episode_len) | (self.day >= self.max_step)
 
         # Flatten positions at episode end
@@ -938,16 +1002,16 @@ class NQWyckoffWeisVecEnv:
         stop_short = is_short_entry & (stopping > thr) & (wave_dir < 0)
         bonus = th.where(stop_short, bonus + scale * 0.4, bonus)
 
-        return bonus
+        return th.clamp(bonus, max=scale)  # cap stacking to 1× scale
 
     # ─── Management bonus (vectorized) ─────────────────────────────────────
 
-    def _compute_management_bonus(self):
+    def _compute_management_bonus(self, action):
         """
         Reward holding winners, penalise overstaying in losers.
-        When flat, apply idle penalty to discourage all-HOLD collapse.
+        When flat, penalise only explicit HOLD when a setup exists.
 
-        -idle_penalty      per bar while flat (no position).
+        -idle_penalty      when flat + HOLD + setup active.
         +mgmt_bonus_scale  per bar while in a winning position.
         -mgmt_penalty_scale per bar when in a losing position too long.
         """
@@ -961,7 +1025,16 @@ class NQWyckoffWeisVecEnv:
                            & (self.unrealized_pnl < 0)
                            & (self.bars_in_trade > self.overstay_bars))
 
-        bonus = th.where(is_flat, bonus - self.idle_penalty, bonus)
+        # Conditional idle penalty: only penalise HOLD when a setup exists
+        thr = self.event_threshold
+        spring   = self.tech_factor[self.day, self._col_spring] > thr
+        upthrust = self.tech_factor[self.day, self._col_upthrust] > thr
+        absorb   = self.tech_factor[self.day, self._col_absorption] > thr
+        stopping = self.tech_factor[self.day, self._col_stopping] > thr
+        setup_present = spring | upthrust | absorb | stopping
+        hold_on_setup = is_flat & (action == ACTION_HOLD) & setup_present
+
+        bonus = th.where(hold_on_setup, bonus - self.idle_penalty, bonus)
         bonus = th.where(winning, bonus + self.mgmt_bonus_scale, bonus)
         bonus = th.where(losing_overstay, bonus - self.mgmt_penalty_scale, bonus)
         return bonus

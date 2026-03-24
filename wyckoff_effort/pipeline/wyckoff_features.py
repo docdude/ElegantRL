@@ -668,11 +668,13 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 40.0) ->
         "wave_shortening_down": sd["wave_shortening_down"],
         "yellow_bar": comp["yellow_bar"],
         "large_wave_score": np.clip(comp["large_wave_score"], 0, 5.0),
-        # Absolute wave E/R + temporal (3) — fills srl-python-indicators gaps
-        "wave_effort_result_raw": wave_effort_result_raw,
-        "wave_time_norm": wave_time_norm,
-        "wave_velocity_norm": wave_velocity_norm,
     }, index=df.index)
+
+    # Store wave temporal features for Block 5 (appended after B4 to preserve
+    # original 58-feature index ordering for live model compatibility)
+    result.attrs["_wave_effort_result_raw"] = wave_effort_result_raw
+    result.attrs["_wave_time_norm"] = wave_time_norm
+    result.attrs["_wave_velocity_norm"] = wave_velocity_norm
 
     logger.info(f"Block 2 (Weis Wave): {result.shape[1]} features computed, "
                 f"reversal={reversal_points}pts")
@@ -1030,8 +1032,16 @@ def build_all_features(
     # Block 4: Range/phase/context (uses wave data from B2)
     b4 = compute_block4_context(df, b2, phase_lookback=phase_lookback)
 
+    # Block 5: Wave temporal features (appended after B4 to preserve
+    # original 58-feature index ordering for live model compatibility)
+    b5 = pd.DataFrame({
+        "wave_effort_result_raw": b2.attrs["_wave_effort_result_raw"],
+        "wave_time_norm": b2.attrs["_wave_time_norm"],
+        "wave_velocity_norm": b2.attrs["_wave_velocity_norm"],
+    }, index=df.index)
+
     # Concatenate all blocks
-    features_df = pd.concat([b1, b2, b3, b4], axis=1)
+    features_df = pd.concat([b1, b2, b3, b4, b5], axis=1)
     feature_names = features_df.columns.tolist()
 
     # Convert to numpy, clean NaN/inf
@@ -1039,8 +1049,8 @@ def build_all_features(
     tech_ary = np.nan_to_num(tech_ary, nan=0.0, posinf=0.0, neginf=0.0)
 
     logger.info(
-        f"Total features: {len(feature_names)} across 4 blocks "
-        f"(B1={b1.shape[1]}, B2={b2.shape[1]}, B3={b3.shape[1]}, B4={b4.shape[1]})")
+        f"Total features: {len(feature_names)} across 5 blocks "
+        f"(B1={b1.shape[1]}, B2={b2.shape[1]}, B3={b3.shape[1]}, B4={b4.shape[1]}, B5={b5.shape[1]})")
     return tech_ary, feature_names, features_df
 
 

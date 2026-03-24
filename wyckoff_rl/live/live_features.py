@@ -34,6 +34,7 @@ from wyckoff_features import build_all_features  # noqa: E402
 
 # Feature indices used in training (36 of 58)
 # From run_config.json of the CPCV run
+# (3 new wave features are appended at indices 58-60, preserving original layout)
 TRAINING_FEATURE_INDICES = [
     0, 1, 4, 5, 8, 9, 10, 11, 13, 14,
     16, 17, 18, 19, 20, 21, 22, 23, 26, 27,

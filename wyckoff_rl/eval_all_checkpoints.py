@@ -38,6 +38,21 @@ from wyckoff_rl.function_train_test import load_wyckoff_data
 
 import torch as th
 
+# Discrete env / actor imports (lazy — only when --discrete is used)
+_NQWyckoffWeisEnv = None
+_ENV_FEATURE_INDICES = None
+
+
+def _ensure_discrete_imports():
+    global _NQWyckoffWeisEnv, _ENV_FEATURE_INDICES
+    if _NQWyckoffWeisEnv is None:
+        from elegantrl.envs.NQWyckoffWeisEnv import (
+            NQWyckoffWeisEnv as _Cls,
+            ENV_FEATURE_INDICES as _EFI,
+        )
+        _NQWyckoffWeisEnv = _Cls
+        _ENV_FEATURE_INDICES = _EFI
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Checkpoint discovery
@@ -176,10 +191,9 @@ def evaluate_single_checkpoint(
     device: str,
     baseline_values: np.ndarray = None,
     baseline_return: float = None,
+    discrete: bool = False,
 ) -> dict | None:
     """Load actor from checkpoint, run deterministic eval on test env."""
-    from elegantrl.envs.WyckoffTradingEnv import WyckoffTradingEnv
-
     try:
         actor = th.load(checkpoint_path, map_location=device, weights_only=False)
         actor.eval()
@@ -187,19 +201,31 @@ def evaluate_single_checkpoint(
         print(f"    WARN: Failed to load {os.path.basename(checkpoint_path)}: {e}")
         return None
 
-    # Build test env (with window_size and feature_indices from training config)
-    env = WyckoffTradingEnv(
-        npz_path=test_npz,
-        initial_amount=initial_amount,
-        cost_per_trade=env_params.get('cost_per_trade', 0.5),
-        reward_mode=env_params.get('reward_mode', 'pnl'),
-        reward_scale=env_params.get('reward_scale', 1.0),
-        beg_idx=0,
-        end_idx=test_len,
-        window_size=env_params.get('window_size', 1),
-        feature_indices=env_params.get('feature_indices', None),
-        continuous_sizing=env_params.get('continuous_sizing', False),
-    )
+    if discrete:
+        _ensure_discrete_imports()
+        env = _NQWyckoffWeisEnv(
+            npz_path=test_npz,
+            beg_idx=0,
+            end_idx=test_len,
+            max_step=test_len,
+            commission=env_params.get('commission', 1.50),
+            feature_indices=env_params.get('feature_indices', _ENV_FEATURE_INDICES),
+            random_start=False,
+        )
+    else:
+        from elegantrl.envs.WyckoffTradingEnv import WyckoffTradingEnv
+        env = WyckoffTradingEnv(
+            npz_path=test_npz,
+            initial_amount=initial_amount,
+            cost_per_trade=env_params.get('cost_per_trade', 0.5),
+            reward_mode=env_params.get('reward_mode', 'pnl'),
+            reward_scale=env_params.get('reward_scale', 1.0),
+            beg_idx=0,
+            end_idx=test_len,
+            window_size=env_params.get('window_size', 1),
+            feature_indices=env_params.get('feature_indices', None),
+            continuous_sizing=env_params.get('continuous_sizing', False),
+        )
 
     # Deterministic rollout
     state, _ = env.reset()
@@ -210,11 +236,19 @@ def evaluate_single_checkpoint(
     while not done:
         state_t = th.as_tensor(state, dtype=th.float32, device=device).unsqueeze(0)
         with th.no_grad():
-            action = actor(state_t).squeeze(0).cpu().numpy()
+            action = actor(state_t)
+            if discrete:
+                action = action.item()  # argmax int from ActorDiscretePPO.forward
+            else:
+                action = action.squeeze(0).cpu().numpy()
         state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         total_reward += reward
-        account_values.append(env.total_asset)
+        if discrete:
+            # equity = realized_pnl + unrealized_pnl
+            account_values.append(initial_amount + info.get('equity', 0.0))
+        else:
+            account_values.append(env.total_asset)
 
     account_values = np.array(account_values)
 
@@ -287,6 +321,7 @@ def evaluate_split(
     gpu_id: int = 0,
     force: bool = False,
     top_k: int = 5,
+    discrete: bool = False,
 ) -> pd.DataFrame | None:
     """Evaluate all checkpoints in one split directory."""
     csv_path = os.path.join(split_dir, 'checkpoint_results.csv')
@@ -358,6 +393,7 @@ def evaluate_split(
             initial_amount, device,
             baseline_values=baseline['values'],
             baseline_return=baseline['return_pct'],
+            discrete=discrete,
         )
         if result is None:
             continue
@@ -622,6 +658,8 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--npz", default=WYCKOFF_NPZ_PATH,
                         help="Path to Wyckoff NPZ data")
+    parser.add_argument("--discrete", action="store_true",
+                        help="Use NQWyckoffWeisEnv + ActorDiscretePPO")
     return parser.parse_args()
 
 
@@ -656,6 +694,7 @@ def main():
         df = evaluate_split(
             split_dir, close_ary, tech_ary,
             gpu_id=args.gpu, force=args.force, top_k=args.top_k,
+            discrete=args.discrete,
         )
         if df is not None:
             split_dfs[os.path.basename(split_dir)] = df

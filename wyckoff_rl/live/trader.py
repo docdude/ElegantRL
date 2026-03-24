@@ -413,7 +413,9 @@ def _load_env():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, _, value = line.partition("=")
-                    os.environ.setdefault(key.strip(), value.strip())
+                    value = value.split("#")[0].strip()   # strip inline comments
+                    value = value.strip('"').strip("'")   # strip surrounding quotes
+                    os.environ.setdefault(key.strip(), value)
 
 
 def main():

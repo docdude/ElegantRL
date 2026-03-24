@@ -67,6 +67,8 @@ class IBConnector:
         self.contract: Optional[Future] = None
         self.ticker: Optional[Ticker] = None
         self._last_price: float = 0.0
+        self._use_mktdata: bool = False
+        self._tick_error: Optional[str] = None
 
     def connect(self):
         """Connect to TWS/IB Gateway."""
@@ -74,6 +76,9 @@ class IBConnector:
                      f"(client_id={self.client_id})")
         self.ib.connect(self.host, self.port, clientId=self.client_id)
         logger.info("Connected to IB")
+
+        # Track data subscription errors
+        self.ib.errorEvent += self._on_ib_error
 
         # Resolve NQ contract
         self.contract = Future("NQ", self.nq_expiry, "CME")
@@ -84,16 +89,50 @@ class IBConnector:
         logger.info(f"Qualified contract: {self.contract}")
 
     def subscribe_ticks(self):
-        """Subscribe to real-time tick-by-tick trade data."""
+        """Subscribe to real-time tick data.
+
+        Tries tick-by-tick first; falls back to reqMktData streaming
+        if the account lacks tick-by-tick permissions.
+        """
         if self.contract is None:
             raise RuntimeError("Must connect() first")
 
-        self.ticker = self.ib.reqTickByTickData(
-            self.contract, "AllLast", numberOfTicks=0, ignoreSize=False
-        )
-        # Register callback
-        self.ticker.updateEvent += self._on_tick_event
-        logger.info(f"Subscribed to tick data for {self.contract.localSymbol}")
+        # Try tick-by-tick first (best granularity)
+        try:
+            self.ticker = self.ib.reqTickByTickData(
+                self.contract, "AllLast", numberOfTicks=0, ignoreSize=False
+            )
+            # Give IB a moment to report errors
+            self.ib.sleep(2)
+
+            # Check if an error was raised for this request
+            if self._tick_error:
+                raise RuntimeError(self._tick_error)
+
+            self.ticker.updateEvent += self._on_tick_event
+            self._use_mktdata = False
+            logger.info(f"Subscribed to tick-by-tick data for "
+                        f"{self.contract.localSymbol}")
+        except Exception as e:
+            logger.warning(f"tick-by-tick failed ({e}), "
+                           f"falling back to reqMktData streaming")
+            # Cancel the failed request if it exists
+            if self.ticker is not None:
+                try:
+                    self.ib.cancelTickByTickData(self.ticker)
+                except Exception:
+                    pass
+
+            self._tick_error = None
+            # Request delayed data (type 3) if live isn't subscribed
+            self.ib.reqMarketDataType(3)
+            self.ticker = self.ib.reqMktData(
+                self.contract, "", False, False
+            )
+            self.ticker.updateEvent += self._on_mktdata_event
+            self._use_mktdata = True
+            logger.info(f"Subscribed to streaming market data for "
+                        f"{self.contract.localSymbol}")
 
     def _on_tick_event(self, ticker: Ticker):
         """Handle incoming tick data."""
@@ -109,6 +148,29 @@ class IBConnector:
         # Determine uptick/downtick from tick type
         # ib_insync: tickType '' for AllLast doesn't distinguish bid/ask
         # Use price vs last price as heuristic
+        is_uptick = price >= self._last_price
+        self._last_price = price
+
+        if self.on_tick:
+            self.on_tick(price, size, is_uptick, timestamp)
+
+    def _on_ib_error(self, reqId, errorCode, errorString, contract):
+        """Capture data-subscription errors (e.g., 10189 = no permissions)."""
+        if errorCode in (10189, 10090, 354):
+            self._tick_error = f"[{errorCode}] {errorString}"
+
+    def _on_mktdata_event(self, ticker: Ticker):
+        """Handle streaming market data (reqMktData fallback)."""
+        price = ticker.last
+        if price != price or price is None:  # NaN check
+            price = ticker.close
+        if price != price or price is None:
+            return
+
+        size = ticker.lastSize if ticker.lastSize == ticker.lastSize else 1
+        timestamp = (ticker.time.timestamp()
+                     if ticker.time else 0.0)
+
         is_uptick = price >= self._last_price
         self._last_price = price
 
@@ -156,6 +218,14 @@ class IBConnector:
     def disconnect(self):
         """Disconnect from IB."""
         if self.ib.isConnected():
+            if self.ticker is not None:
+                try:
+                    if self._use_mktdata:
+                        self.ib.cancelMktData(self.contract)
+                    else:
+                        self.ib.cancelTickByTickData(self.ticker)
+                except Exception:
+                    pass
             self.ib.disconnect()
             logger.info("Disconnected from IB")
 

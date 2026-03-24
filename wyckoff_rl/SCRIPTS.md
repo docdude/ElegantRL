@@ -318,3 +318,7 @@ python -m wyckoff_rl.normalize_npz --input raw.npz --output normalized.npz
 | `trade_reward_weight` | 0.5 | Trade-close bonus weight |
 | `reward_scale` | 256 | Reward normalization |
 | `cost_per_trade` | 0.5 | Points per side (commission + slippage) |
+
+
+To DO:  1. tick by tick data training cnn and wavenet with weights
+        2. cnn training with weights 1s presample
