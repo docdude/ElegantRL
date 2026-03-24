@@ -1386,24 +1386,151 @@ def run_feature_pipeline(
 
 if __name__ == "__main__":
     import argparse
+    import sys
 
-    parser = argparse.ArgumentParser(description="Wyckoff-Weis Wave Feature Pipeline")
-    parser.add_argument("--scid", type=str, default=None, help="Path to SCID file")
-    parser.add_argument("--bar-size", type=float, default=None, help="Range bar size in points")
-    parser.add_argument("--reversal", type=float, default=None, help="ZigZag reversal points")
-    parser.add_argument("--output-dir", type=str, default=None, help="Output directory")
-    parser.add_argument("--no-importance", action="store_true", help="Skip importance evaluation")
-    args = parser.parse_args()
+    def _cmd_build(args):
+        """SCID → range bars → features → NPZ."""
+        result = run_feature_pipeline(
+            scid_path=args.scid,
+            bar_size=args.bar_size,
+            reversal_points=args.reversal,
+            output_dir=args.output_dir,
+            run_importance=not args.no_importance,
+        )
+        print(f"\nPipeline complete:")
+        print(f"  Bars:     {result['n_bars']:,}")
+        print(f"  Features: {result['n_features']}")
+        print(f"  NPZ:      {result['npz_path']}")
+        print(f"  Parquet:  {result['parquet_path']}")
 
-    result = run_feature_pipeline(
-        scid_path=args.scid,
-        bar_size=args.bar_size,
-        reversal_points=args.reversal,
-        output_dir=args.output_dir,
-        run_importance=not args.no_importance,
+    def _cmd_verify(args):
+        """Inspect an existing NPZ: shape, feature stats, phase score diagnostics."""
+        npz = np.load(args.npz, allow_pickle=True)
+        tech = npz["tech_ary"]
+        close = npz["close_ary"]
+        names = list(npz["feature_names"])
+        n_bars, n_feat = tech.shape
+
+        print(f"\n{'='*60}")
+        print(f"NPZ: {args.npz}")
+        print(f"{'='*60}")
+        print(f"  Bars:      {n_bars:,}")
+        print(f"  Features:  {n_feat}")
+        print(f"  Close:     {close.shape}")
+        print(f"  dtype:     {tech.dtype}")
+
+        # NaN / Inf
+        nan_count = np.isnan(tech).sum()
+        inf_count = np.isinf(tech).sum()
+        print(f"  NaN cells: {nan_count}")
+        print(f"  Inf cells: {inf_count}")
+
+        # Phase score diagnostics
+        phase_idx = [i for i, n in enumerate(names) if "phase_" in n and "score" in n]
+        if phase_idx:
+            phase_vals = tech[:, phase_idx]
+            phase_sum = phase_vals.sum(axis=1)
+            phase_names = [names[i] for i in phase_idx]
+            print(f"\n  Phase scores ({phase_names}):")
+            print(f"    sum  min={phase_sum.min():.4f}  max={phase_sum.max():.4f}  mean={phase_sum.mean():.4f}")
+            normalized = np.allclose(phase_sum, 1.0, atol=0.01)
+            print(f"    normalized (sum≈1): {'YES ✓' if normalized else 'NO ✗  — run normalize-phases to fix'}")
+        else:
+            print("\n  (no phase score columns found)")
+
+        # Per-feature summary
+        if args.stats:
+            print(f"\n  {'Feature':<30s} {'mean':>9s} {'std':>9s} {'min':>9s} {'max':>9s} {'zero%':>7s}")
+            print(f"  {'-'*30} {'-'*9} {'-'*9} {'-'*9} {'-'*9} {'-'*7}")
+            for i, name in enumerate(names):
+                col = tech[:, i]
+                z_pct = (col == 0).sum() / n_bars * 100
+                print(f"  {name:<30s} {col.mean():9.4f} {col.std():9.4f} "
+                      f"{col.min():9.4f} {col.max():9.4f} {z_pct:6.1f}%")
+
+    def _cmd_normalize_phases(args):
+        """Patch phase scores in an existing NPZ so they sum to 1.0."""
+        import os
+        npz_data = np.load(args.npz, allow_pickle=True)
+        tech = npz_data["tech_ary"].copy()
+        names = list(npz_data["feature_names"])
+
+        phase_idx = [i for i, n in enumerate(names) if "phase_" in n and "score" in n]
+        if not phase_idx:
+            print("ERROR: No phase score columns found in NPZ.")
+            sys.exit(1)
+
+        phase_vals = tech[:, phase_idx]
+        phase_sum_before = phase_vals.sum(axis=1)
+        print(f"Before: phase sum  min={phase_sum_before.min():.4f}  "
+              f"max={phase_sum_before.max():.4f}  mean={phase_sum_before.mean():.4f}")
+
+        if np.allclose(phase_sum_before, 1.0, atol=0.01):
+            print("Phase scores already normalized — nothing to do.")
+            return
+
+        # Normalize
+        eps = 1e-8
+        row_sum = phase_vals.sum(axis=1, keepdims=True) + eps
+        tech[:, phase_idx] = phase_vals / row_sum
+
+        phase_sum_after = tech[:, phase_idx].sum(axis=1)
+        print(f"After:  phase sum  min={phase_sum_after.min():.4f}  "
+              f"max={phase_sum_after.max():.4f}  mean={phase_sum_after.mean():.4f}")
+
+        if args.dry_run:
+            print("(dry-run — NPZ not modified)")
+            return
+
+        # Save — preserve all original arrays
+        save_kwargs = {k: npz_data[k] for k in npz_data.files}
+        save_kwargs["tech_ary"] = tech
+        np.savez_compressed(args.npz, **save_kwargs)
+        size_mb = os.path.getsize(args.npz) / 1024 / 1024
+        print(f"Saved: {args.npz} ({size_mb:.1f} MB)")
+
+    # ── CLI ───────────────────────────────────────────────────────────────
+    parser = argparse.ArgumentParser(
+        description="Wyckoff-Weis Wave Feature Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+examples:
+  # Full rebuild from SCID
+  python -m wyckoff_effort.pipeline.wyckoff_features build --reversal 80
+
+  # Inspect existing NPZ
+  python -m wyckoff_effort.pipeline.wyckoff_features verify wyckoff_effort/pipeline_output/wyckoff_nq_40pt.npz
+
+  # Patch phase scores in-place
+  python -m wyckoff_effort.pipeline.wyckoff_features normalize-phases wyckoff_effort/pipeline_output/wyckoff_nq_40pt.npz
+""",
     )
-    print(f"\nPipeline complete:")
-    print(f"  Bars:     {result['n_bars']:,}")
-    print(f"  Features: {result['n_features']}")
-    print(f"  NPZ:      {result['npz_path']}")
-    print(f"  Parquet:  {result['parquet_path']}")
+    sub = parser.add_subparsers(dest="command")
+
+    # ── build ──
+    p_build = sub.add_parser("build", help="SCID → range bars → features → NPZ")
+    p_build.add_argument("--scid", type=str, default=None, help="Path to SCID file")
+    p_build.add_argument("--bar-size", type=float, default=None, help="Range bar size in points")
+    p_build.add_argument("--reversal", type=float, default=None, help="ZigZag reversal points")
+    p_build.add_argument("--output-dir", type=str, default=None, help="Output directory")
+    p_build.add_argument("--no-importance", action="store_true", help="Skip importance evaluation")
+
+    # ── verify ──
+    p_verify = sub.add_parser("verify", help="Inspect NPZ: shape, stats, phase score check")
+    p_verify.add_argument("npz", type=str, help="Path to NPZ file")
+    p_verify.add_argument("--stats", action="store_true", help="Print per-feature statistics")
+
+    # ── normalize-phases ──
+    p_norm = sub.add_parser("normalize-phases", help="Normalize phase scores in existing NPZ")
+    p_norm.add_argument("npz", type=str, help="Path to NPZ file")
+    p_norm.add_argument("--dry-run", action="store_true", help="Show what would change without saving")
+
+    args = parser.parse_args()
+    if args.command == "build":
+        _cmd_build(args)
+    elif args.command == "verify":
+        _cmd_verify(args)
+    elif args.command == "normalize-phases":
+        _cmd_normalize_phases(args)
+    else:
+        parser.print_help()
