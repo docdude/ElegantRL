@@ -193,10 +193,22 @@ def train_split(
 
     if not is_off_policy:
         try:
+            th.cuda.init()  # ensure CUDA context exists before querying
             gpu_free, gpu_total = th.cuda.mem_get_info(gpu_id)
         except Exception:
-            gpu_free = 7 * 1024**3
-            gpu_total = 8 * 1024**3
+            # Fallback: query nvidia-smi for actual memory
+            try:
+                import subprocess
+                _smi = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=memory.free,memory.total",
+                     "--format=csv,noheader,nounits", f"--id={gpu_id}"],
+                    timeout=5, text=True,
+                ).strip().split(",")
+                gpu_free = int(_smi[0].strip()) * 1024**2   # MiB → bytes
+                gpu_total = int(_smi[1].strip()) * 1024**2
+            except Exception:
+                gpu_free = 7 * 1024**3
+                gpu_total = 8 * 1024**3
         _reserve = 512 * 1024**2  # 512 MiB for fragmentation/allocator headroom
         usable = max(gpu_free - _reserve, gpu_total - 2 * 1024**3)
         gpu_used = gpu_total - gpu_free
