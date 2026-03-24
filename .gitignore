@@ -48,3 +48,10 @@ train_results/
 
 # PDF papers (too large)
 *.pdf
+
+# Misc local files
+.venv/
+chat.json
+chat_new.json
+live_logs/
+srl-python-indicators-master/
