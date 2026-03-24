@@ -184,12 +184,7 @@ def train_split(
 
     # Auto-scale num_envs and num_workers based on GPU memory
     _cpu_count = os.cpu_count() or 8
-    if is_nq_discrete:
-        # GPU-vectorized env IS the parallelism — extra workers just duplicate
-        # the env on GPU.  1 worker is optimal for NQWyckoffWeisVecEnv.
-        _num_workers = 1
-    else:
-        _num_workers = min(_cpu_count // 4, 4) if not is_off_policy else min(_cpu_count // 2, 6)
+    _num_workers = min(_cpu_count // 4, 4) if not is_off_policy else min(_cpu_count // 2, 6)
 
     if not is_off_policy:
         try:
