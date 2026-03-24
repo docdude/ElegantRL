@@ -102,7 +102,7 @@ The training NPZ is generated in two steps:
 python wyckoff_effort/pipeline/wyckoff_features.py \
   --scid wyckoff_effort/datasets/NQZ25-CME.scid \
   --bar-size 40.0 \
-  --reversal 40.0 \
+  --reversal 120.0 \
   --output-dir wyckoff_effort/pipeline_output/ \
   --no-importance
 

@@ -200,7 +200,8 @@ def compute_block1_microstructure(df: pd.DataFrame) -> pd.DataFrame:
     returns_raw = _safe_div(np.diff(c, prepend=c[0]), c)
     volatility_20 = _rolling_std(returns_raw, 20)
     # Normalize: tanh so it's bounded
-    vol_20_norm = np.tanh(volatility_20 * 200)
+    # Multiplier calibrated so p10→~0.2, p90→~0.8 for NQ range bars
+    vol_20_norm = np.tanh(volatility_20 * 500)
 
     result = pd.DataFrame({
         "body_ratio": body_ratio,
@@ -234,10 +235,10 @@ def _segment_waves(
     low: np.ndarray,
     volume: np.ndarray,
     delta: np.ndarray,
-    reversal_points: float = 40.0,
+    reversal_points: float = 120.0,
 ) -> dict:
     """
-    Weis Wave ZigZag segmentation (points-based reversal for 40pt NQ bars).
+    Weis Wave ZigZag segmentation (points-based reversal, 3x bar size).
 
     Returns dict of arrays: wave_dir, wave_id, wave_high, wave_low,
                             wave_vol, wave_delta, wave_start_idx
@@ -548,14 +549,14 @@ def _compute_supply_demand_balance(wave_id, wave_dir, wave_vol, wave_high, wave_
     }
 
 
-def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 40.0) -> pd.DataFrame:
+def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 120.0) -> pd.DataFrame:
     """
     Compute Weis Wave features: wave segmentation + wave-to-wave comparison.
 
     Parameters
     ----------
     reversal_points : float
-        ZigZag reversal threshold in price points (40 for NQ 40pt range bars).
+        ZigZag reversal threshold in price points (120 = 3x bar size for NQ 40pt).
     """
     c = df["close"].values.astype(np.float64)
     h = df["high"].values.astype(np.float64)
@@ -569,7 +570,6 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 40.0) ->
     # Current wave features
     wave_disp = np.abs(waves["wave_high"] - waves["wave_low"])
     avg_wave_vol = _rolling_mean(waves["wave_vol"], 50)
-    avg_wave_len_approx = 20.0  # approximate bars per wave for progress
 
     # Wave displacement in bars (count bars in current wave)
     wave_bars = np.zeros(len(c))
@@ -581,6 +581,11 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 40.0) ->
             last_id = waves["wave_id"][i]
         count += 1
         wave_bars[i] = count
+
+    # Compute actual average wave length from data (was hardcoded at 20.0)
+    n_waves = waves["wave_id"][-1] - waves["wave_id"][0] + 1
+    avg_wave_len = len(c) / max(n_waves, 1)
+    logger.info(f"Average wave length: {avg_wave_len:.1f} bars ({n_waves} waves)")
 
     # Wave-to-wave comparisons
     comp = _compute_completed_wave_stats(
@@ -647,7 +652,7 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 40.0) ->
     result = pd.DataFrame({
         # Current wave state (5)
         "wave_direction": waves["wave_dir"],
-        "wave_progress": np.clip(wave_bars / avg_wave_len_approx, 0, 5.0),
+        "wave_progress": np.clip(wave_bars / avg_wave_len, 0, 5.0),
         "wave_displacement_norm": np.clip(wave_disp / atr, 0, 5.0),
         "wave_vol_cumulative_norm": np.clip(_safe_div(waves["wave_vol"], avg_wave_vol), 0, 5.0),
         "wave_delta_ratio": np.clip(_safe_div(waves["wave_delta"], np.maximum(waves["wave_vol"], EPSILON)), -1, 1),
@@ -742,9 +747,8 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     # Override: for up-wave bars use up-wave exhaustion from separate tracker
     # wave_vol_same tracks same-direction, so up-bar exhaustion is already captured
     spring_score = np.clip(
-        spring_penetration * spring_recovery
-        * (0.5 + 0.5 * spring_delta)
-        * (0.3 + 0.7 * wave_exhaust_down),  # wave exhaustion required
+        np.sqrt(spring_penetration) * spring_recovery
+        * (0.5 + 0.3 * spring_delta + 0.2 * wave_exhaust_down),
         0, 1
     )
 
@@ -756,9 +760,8 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     ut_rejection = 1.0 - ut_rejection  # invert: close near low = strong rejection
     ut_delta = np.clip(-delta_ratio, 0, 1)  # negative delta = selling
     upthrust_score = np.clip(
-        ut_penetration * ut_rejection
-        * (0.5 + 0.5 * ut_delta)
-        * (0.3 + 0.7 * wave_exhaust_up),  # wave exhaustion required
+        np.sqrt(ut_penetration) * ut_rejection
+        * (0.5 + 0.3 * ut_delta + 0.2 * wave_exhaust_up),
         0, 1
     )
 
@@ -777,9 +780,9 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     er_bar = _safe_div(np.abs(np.diff(c, prepend=c[0])), np.maximum(vol, EPSILON))
     er_mean = _rolling_mean(er_bar, 20)
     er_ratio_bar = _safe_div(er_bar, er_mean)
-    # Absorption: vol high + ER low
-    abs_vol_component = np.clip((vol_ratio - 1.0) / 0.5, 0, 1)  # 1.5× → 1.0
-    abs_er_component = np.clip(1.0 - er_ratio_bar / 0.5, 0, 1)  # ER<0.5 → 1.0
+    # Absorption: vol high + ER low (tightened: 2× avg vol, ER < 0.3× avg)
+    abs_vol_component = np.clip((vol_ratio - 1.5) / 1.0, 0, 1)  # 2.5× → 1.0
+    abs_er_component = np.clip(1.0 - er_ratio_bar / 0.3, 0, 1)  # ER<0.3 → 1.0
     absorption_score = np.clip(abs_vol_component * abs_er_component, 0, 1)
     absorption_direction = np.where(
         absorption_score > 0.3,
@@ -790,9 +793,11 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     # STOPPING ACTION (wave level): large wave vol + small displacement
     large_wave = b2["large_wave_score"].values if "large_wave_score" in b2 else np.ones(n)
     wave_disp = b2["wave_displacement_norm"].values if "wave_displacement_norm" in b2 else np.ones(n)
-    # High effort (>1.5× avg vol) + small result (<0.5× avg displacement)
-    stopping_vol = np.clip((large_wave - 1.0) / 1.0, 0, 1)
-    stopping_disp = np.clip(1.0 - wave_disp / 1.0, 0, 1)
+    # High effort (>2× avg vol) + small result (<0.3× avg displacement)
+    # Calibrated for 40pt NQ range bars where waves avg ~6 bars and
+    # displacement is naturally small (median 0.064).
+    stopping_vol = np.clip((large_wave - 2.0) / 1.0, 0, 1)   # 3.0× → 1.0
+    stopping_disp = np.clip(1.0 - wave_disp / 0.3, 0, 1)     # disp<0.3 → 1.0
     stopping_action_score = np.clip(stopping_vol * stopping_disp, 0, 1)
 
     # ---- Event-relative temporal features ----
@@ -1011,7 +1016,7 @@ def compute_block4_context(df: pd.DataFrame, b2: pd.DataFrame,
 
 def build_all_features(
     df: pd.DataFrame,
-    reversal_points: float = 40.0,
+    reversal_points: float = 120.0,
     swing_lookback: int = 20,
     phase_lookback: int = 50,
 ) -> Tuple[np.ndarray, List[str], pd.DataFrame]:
@@ -1023,7 +1028,7 @@ def build_all_features(
     df : pd.DataFrame
         OHLCV + delta + duration data from range bars.
     reversal_points : float
-        ZigZag reversal in price points (40 for NQ 40pt range bars).
+        ZigZag reversal in price points (120 = 3x bar size for NQ 40pt).
     swing_lookback : int
         Bars for swing high/low computation.
     phase_lookback : int
@@ -1246,7 +1251,7 @@ def run_feature_pipeline(
     bar_size : float
         Range bar size in points. Defaults to config.RANGE_BAR_SIZE (40.0).
     reversal_points : float
-        ZigZag reversal for Weis Wave. Defaults to config.REVERSAL_POINTS (200.0).
+        ZigZag reversal for Weis Wave. Defaults to config.REVERSAL_POINTS (120.0).
     output_dir : str
         Output directory. Defaults to config.OUTPUT_DIR.
     run_importance : bool

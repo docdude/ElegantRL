@@ -156,6 +156,7 @@ class WyckoffTrader:
         data_adapter: DataAdapter,
         order_adapter: OrderAdapter,
         range_size: float = 40.0,
+        reversal_mult: float = 3.0,
         window_size: int = 30,
         feature_indices: list[int] = None,
         continuous_sizing: bool = False,
@@ -185,7 +186,7 @@ class WyckoffTrader:
         self.feature_engine = LiveFeatureEngine(
             buffer_size=200,
             feature_indices=feat_idx,
-            reversal_points=range_size,
+            reversal_points=range_size * reversal_mult,
         )
 
         # 3. Inference Engine
@@ -453,6 +454,8 @@ Examples:
     common.add_argument("--checkpoint", type=str, required=True,
                         help="Path to actor .pt checkpoint")
     common.add_argument("--range-size", type=float, default=40.0)
+    common.add_argument("--reversal-mult", type=float, default=3.0,
+                        help="ZigZag reversal multiplier vs bar size (1=legacy, 3=structural)")
     common.add_argument("--continuous", action="store_true",
                         default=os.environ.get("CONTINUOUS_SIZING", "").lower() == "true")
     common.add_argument("--max-contracts", type=int, default=1)
@@ -552,6 +555,7 @@ Examples:
         data_adapter=data_adapter,
         order_adapter=order_adapter,
         range_size=args.range_size,
+        reversal_mult=args.reversal_mult,
         continuous_sizing=args.continuous,
         max_contracts=args.max_contracts,
         log_dir=args.log_dir,

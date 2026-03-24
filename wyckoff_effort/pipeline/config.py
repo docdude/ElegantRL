@@ -46,7 +46,7 @@ WYCKOFF_PARAMS = {
 
 # ── New Feature Engineering Settings (wyckoff_features.py) ──────────────────
 
-REVERSAL_POINTS = 80.0  # ZigZag reversal = 2× bar size for meaningful waves (was 40 = single-bar noise)  # noqa: E501  (matches live precompute)
+REVERSAL_POINTS = 120.0  # ZigZag reversal = 3× bar size for structural Wyckoff waves  # noqa: E501
 
 
 # ── Feature Schema ───────────────────────────────────────────────────────────

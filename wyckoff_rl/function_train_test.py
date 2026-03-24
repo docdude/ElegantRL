@@ -263,7 +263,7 @@ def train_split(
             'overstay_bars': 20,
             'regime_penalty_scale': 0.05,
             'idle_penalty': 0.0,
-            'carry_cost': 0.002,
+            'carry_cost': 0.015,
             'vesting_bars': 10,
             'bar_range': env_params.get('bar_range', 40.0),
             'gamma': erl_params.get('gamma', 0.99),

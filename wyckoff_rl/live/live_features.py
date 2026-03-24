@@ -56,14 +56,14 @@ class LiveFeatureEngine:
     feature_indices : list[int]
         Indices into the 58-feature array to select for the model.
     reversal_points : float
-        ZigZag reversal for Weis Wave (40 for NQ 40pt range bars).
+        ZigZag reversal for Weis Wave (120 = 3x bar size for NQ 40pt).
     """
 
     def __init__(
         self,
         buffer_size: int = 200,
         feature_indices: Optional[list[int]] = None,
-        reversal_points: float = 40.0,
+        reversal_points: float = 120.0,
     ):
         self.buffer_size = buffer_size
         self.feature_indices = feature_indices or TRAINING_FEATURE_INDICES

@@ -90,6 +90,7 @@ class PrecomputedReplay:
         start_date: str,
         end_date: str,
         range_size: float = 40.0,
+        reversal_mult: float = 3.0,
         window_size: int = 30,
         feature_buffer: int = 200,
         feature_indices: Optional[list[int]] = None,
@@ -185,7 +186,7 @@ class PrecomputedReplay:
         } for b in bars])
 
         from wyckoff_effort.pipeline.wyckoff_features import build_all_features
-        tech_ary, _, _ = build_all_features(bar_df, reversal_points=range_size)
+        tech_ary, _, _ = build_all_features(bar_df, reversal_points=range_size * reversal_mult)
         features = tech_ary[:, feat_idx].astype(np.float32)  # (n_bars, 36)
         t2 = time.time()
         logger.info(f"  Computed {features.shape} features in {t2-t1:.1f}s")
