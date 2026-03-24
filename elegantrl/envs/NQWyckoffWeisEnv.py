@@ -751,6 +751,12 @@ class NQWyckoffWeisVecEnv:
                 f"episode_len={episode_len} bars={len(close_ary)} "
                 f"entry_bonus={entry_bonus_scale} pnl_norm={pnl_norm}\n"
             )
+            self._flog.write(
+                "step,|pnl|,|entry|,|mgmt|,|pen|,|regime|,"
+                "H%,EL%,ES%,A%,R%,X%,"
+                "ep_done,ep_pnl_mean,ep_pnl_std,ep_trades_mean,"
+                "pos_pct,long_pct,short_pct,avg_unreal\n"
+            )
 
         # Startup banner — confirms new code is loaded
         print(
@@ -760,12 +766,6 @@ class NQWyckoffWeisVecEnv:
             f"bars={self.close_price.shape[0]} num_envs={num_envs}",
             flush=True,
         )
-            self._flog.write(
-                "step,|pnl|,|entry|,|mgmt|,|pen|,|regime|,"
-                "H%,EL%,ES%,A%,R%,X%,"
-                "ep_done,ep_pnl_mean,ep_pnl_std,ep_trades_mean,"
-                "pos_pct,long_pct,short_pct,avg_unreal\n"
-            )
 
     # ─── Reset ────────────────────────────────────────────────────────────
 
