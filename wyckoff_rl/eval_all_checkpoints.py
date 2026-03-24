@@ -232,6 +232,7 @@ def evaluate_single_checkpoint(
     account_values = [initial_amount]
     done = False
     total_reward = 0.0
+    last_info = {}
 
     while not done:
         state_t = th.as_tensor(state, dtype=th.float32, device=device).unsqueeze(0)
@@ -244,6 +245,7 @@ def evaluate_single_checkpoint(
         state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         total_reward += reward
+        last_info = info
         if discrete:
             # equity = realized_pnl + unrealized_pnl
             account_values.append(initial_amount + info.get('equity', 0.0))
@@ -295,8 +297,9 @@ def evaluate_single_checkpoint(
         'max_drawdown': max_dd,
         'ann_return': final_return,  # approximation for range bars
         'total_reward': total_reward,
-        'n_trades': getattr(env, 'total_trades', 0),
+        'n_trades': last_info.get('total_trades', getattr(env, 'total_trades', 0)),
         'turnover': getattr(env, 'total_turnover', 0.0),
+        'action_counts': last_info.get('action_counts', None),
         'alpha': alpha,
         'days_beating': days_beating,
         'pct_beating': pct_beating,
@@ -416,12 +419,17 @@ def evaluate_split(
         all_curves[ckpt['filename']] = result['account_values']
 
         avgR_str = f"avgR={ckpt['avgR']:.1f}" if ckpt['avgR'] else "final"
+        act_str = ""
+        if result.get('action_counts'):
+            ac = result['action_counts']
+            act_names = ['H', 'EL', 'ES', 'A', 'R', 'X']
+            act_str = " [" + "/".join(f"{act_names[i]}:{ac[i]}" for i in range(min(len(ac), len(act_names)))) + "]"
         print(f"    {ckpt['filename']:<45} "
               f"Ret={result['final_return']*100:>+7.2f}%  "
               f"Alpha={result['alpha']:>+6.2f}  "
               f"Sharpe={result['sharpe']:>7.2f}  "
               f"MaxDD={result['max_drawdown']*100:>6.1f}%  "
-              f"Trades={result['n_trades']}  ({avgR_str})")
+              f"Trades={result['n_trades']}  ({avgR_str}){act_str}")
 
     if not rows:
         return None

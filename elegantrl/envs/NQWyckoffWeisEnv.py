@@ -242,6 +242,8 @@ class NQWyckoffWeisEnv:
         self._mae: float = 0.0
         # Bookkeeping
         self.cumulative_returns = 0.0
+        self.total_trades = 0
+        self._action_counts = [0] * N_ACTIONS  # per-action histogram
 
     # ─── Reset ────────────────────────────────────────────────────────────
 
@@ -264,6 +266,8 @@ class NQWyckoffWeisEnv:
         self._realized = 0.0
         self._mfe = 0.0
         self._mae = 0.0
+        self.total_trades = 0
+        self._action_counts = [0] * N_ACTIONS
         return self._get_obs(), {}
 
     # ─── Step ─────────────────────────────────────────────────────────────
@@ -321,10 +325,13 @@ class NQWyckoffWeisEnv:
             self.cumulative_returns = self._realized
 
         obs = self._get_obs()
+        self._action_counts[action] += 1
         info = {
             "equity": self._realized + self._unrealized,
             "realized_pnl": self._realized,
             "position_side": self._side,
+            "total_trades": self.total_trades,
+            "action_counts": list(self._action_counts),
         }
         return obs, float(reward), terminated, truncated, info
 
@@ -390,6 +397,7 @@ class NQWyckoffWeisEnv:
         self._mfe = 0.0
         self._mae = 0.0
         self._realized -= self.commission
+        self.total_trades += 1
 
     def _add(self, price: float):
         new_size = self._size + 1.0
@@ -398,6 +406,7 @@ class NQWyckoffWeisEnv:
         ) / new_size
         self._size = new_size
         self._realized -= self.commission
+        self.total_trades += 1
 
     def _reduce(self, price: float):
         frac = 1.0 / max(self._size, 1.0)
@@ -421,6 +430,7 @@ class NQWyckoffWeisEnv:
         self._bars_in_trade = 0
         self._mfe = 0.0
         self._mae = 0.0
+        self.total_trades += 1
 
     def _compute_pnl(self, price: float) -> float:
         ticks = ((price - self._entry_price) / self.tick_size) * self._side
