@@ -978,6 +978,13 @@ def compute_block4_context(df: pd.DataFrame, b2: pd.DataFrame,
         0, 1
     )
 
+    # Normalize phase scores so they form a proper distribution (sum ≈ 1)
+    phase_sum = phase_accum + phase_markup + phase_distrib + phase_markdown + EPSILON
+    phase_accum = phase_accum / phase_sum
+    phase_markup = phase_markup / phase_sum
+    phase_distrib = phase_distrib / phase_sum
+    phase_markdown = phase_markdown / phase_sum
+
     # Higher timeframe trend (4× structure)
     trend_4x = np.tanh(_linreg_slope(c, 80) / (np.std(c) / 80 + EPSILON))
 

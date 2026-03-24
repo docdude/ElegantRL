@@ -263,6 +263,7 @@ def train_split(
             'overstay_bars': 20,
             'regime_penalty_scale': 0.01,
             'idle_penalty': 0.005,
+            'bar_range': env_params.get('bar_range', 40.0),
             'gamma': erl_params.get('gamma', 0.99),
             'reward_mode': env_params.get('reward_mode', 'pnl'),
             'log_dir': cwd,

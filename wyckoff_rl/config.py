@@ -32,7 +32,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 N_GROUPS = 5
 K_TEST_GROUPS = 2
-EMBARGO_BARS = 100        # in range bars (reduced for 7.6K bar dataset; ~100 bars ≈ 1 session)
+EMBARGO_BARS = 200        # in range bars (~200 bars ≈ 2 sessions; prevents leakage across folds)
 
 def nCr(n, r):
     r = min(r, n - r)
@@ -68,7 +68,7 @@ DEFAULT_ENV_PARAMS = {
     "reward_mode": "pnl",           # "pnl", "log_ret", "sharpe", "sortino"
     "reward_scale": 1.0,            # NQ discrete env handles its own scaling
     "num_envs": 4096,               # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
-    "episode_len": 1024,            # sub-episode length for PPO (~7 sub-episodes in 7.6K bars)
+    "episode_len": 2048,            # sub-episode length for PPO (~3.7 sub-episodes in 7.6K bars)
     "window_size": WINDOW_SIZE,     # sliding window of bars for temporal context (legacy continuous)
     "feature_indices": SELECTED_INDICES,  # column indices into 61-feature tech_ary (legacy continuous)
     "continuous_sizing": False,     # False={-1,0,+1} binary, True=[-1,+1] continuous
@@ -101,7 +101,7 @@ DEFAULT_ERL_PARAMS = {
     "lambda_gae_adv": 0.95,
     "if_use_v_trace": True,
     "eval_per_step": 50_000,
-    "eval_times": 32,
+    "eval_times": 16,
     "loss_weight": 1.0,             # Asymmetric advantage: 1.0=symmetric (standard PPO), 2.0=2x penalty for losses
 }
 

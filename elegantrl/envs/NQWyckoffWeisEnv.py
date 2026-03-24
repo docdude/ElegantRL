@@ -181,6 +181,7 @@ class NQWyckoffWeisEnv:
         idle_penalty: float = 0.05,
         pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
+        bar_range: float = 40.0,
         random_start: bool = True,
         feature_indices: list[int] | None = None,
         **kwargs,
@@ -212,6 +213,7 @@ class NQWyckoffWeisEnv:
         self.idle_penalty = idle_penalty
         self.reward_clip = reward_clip
         self.random_start = random_start
+        self.bar_range = bar_range
         self.max_episode_bars = max_step
 
         # PnL normalisation – default $2000 so 40pt 2-lot = 0.8 (no clip)
@@ -317,7 +319,7 @@ class NQWyckoffWeisEnv:
         if truncated and self._side != 0:
             # Flatten at episode end
             px = self._exec_price(is_buy=(self._side < 0))
-            self._realized += self._compute_pnl(px) - self.commission
+            self._realized += self._compute_pnl(px) - self.commission * self._size
             self._side = 0
             self._size = 0.0
 
@@ -423,7 +425,7 @@ class NQWyckoffWeisEnv:
 
     def _close(self, price: float):
         pnl = self._compute_pnl(price)
-        self._realized += pnl - self.commission
+        self._realized += pnl - self.commission * self._size  # per-contract commission
         self._side = 0
         self._size = 0.0
         self._entry_price = 0.0
@@ -524,7 +526,7 @@ class NQWyckoffWeisEnv:
 
         # Position features
         px = float(self.close_ary[self._t])
-        atr = 40.0  # 40-point range bars → ATR ≈ range size
+        atr = self.bar_range  # configurable range bar size
         if self._side != 0:
             entry_dist = ((px - self._entry_price) / atr) * self._side
         else:
@@ -535,7 +537,7 @@ class NQWyckoffWeisEnv:
             self._size / max(self.max_position_size, 1),
             entry_dist,
             self._unrealized / self.pnl_norm,
-            self._realized / (2.0 * self.pnl_norm),
+            float(np.clip(self._realized / (2.0 * self.pnl_norm), -1.0, 1.0)),
             min(self._bars_in_trade / 50.0, 1.0),
             self._mfe / self.pnl_norm,
             self._mae / self.pnl_norm,
@@ -604,6 +606,7 @@ class NQWyckoffWeisVecEnv:
         idle_penalty: float = 0.05,
         pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
+        bar_range: float = 40.0,
         feature_indices: list[int] | None = None,
         gamma: float = 0.99,            # kept for ElegantRL Config compat
         reward_mode: str = "pnl",       # kept for Config compat
@@ -647,6 +650,7 @@ class NQWyckoffWeisVecEnv:
         self.idle_penalty = idle_penalty
         self.reward_clip = reward_clip
         self.pnl_norm = pnl_norm  # $2000 default – 40pt 2-lot = 0.8 (no clip)
+        self.bar_range = bar_range  # range bar size for ATR normalization
         self.gamma = gamma
 
         # ── ElegantRL metadata ───────────────────────────────────────────
@@ -743,10 +747,9 @@ class NQWyckoffWeisVecEnv:
         if self._stagger:
             max_start = max(50, self.max_step - self._episode_len)
             self.day = th.randint(50, max_start, (ne,), dtype=th.long, device=dev)
-            # Desynchronise: random offset within episode
-            offset = th.randint(0, self._episode_len, (ne,), dtype=th.long, device=dev)
-            self.step_count = offset.clone()
-            self.day = th.clamp(self.day + offset, max=self.max_step)
+            # Desynchronise via day offset only; step_count starts at 0
+            # so every env gets a full first episode (no partial-episode waste)
+            self.step_count = th.zeros(ne, dtype=th.long, device=dev)
         else:
             self.day = th.full((ne,), 50, dtype=th.long, device=dev)  # skip warmup
             self.step_count = th.zeros(ne, dtype=th.long, device=dev)
@@ -762,7 +765,7 @@ class NQWyckoffWeisVecEnv:
 
         # Position features
         curr_price = self.close_price[self.day]  # (ne,)
-        atr = 40.0  # range bar size
+        atr = self.bar_range  # configurable range bar size
 
         entry_dist = th.where(
             self.pos_side != 0,
@@ -775,7 +778,7 @@ class NQWyckoffWeisVecEnv:
             self.pos_size / max(self.max_position_size, 1.0),
             entry_dist,
             self.unrealized_pnl / self.pnl_norm,
-            self.realized_pnl / (2.0 * self.pnl_norm),
+            (self.realized_pnl / (2.0 * self.pnl_norm)).clamp(-1.0, 1.0),
             (self.bars_in_trade.float() / 50.0).clamp(max=1.0),
             self.mfe / self.pnl_norm,
             self.mae / self.pnl_norm,
@@ -968,8 +971,9 @@ class NQWyckoffWeisVecEnv:
 
         exit_price = th.where(is_long, sell_price, buy_price)
         exit_pnl = self._compute_pnl(exit_price)
+        exit_comm = self.commission * self.pos_size  # per-contract commission
         self.realized_pnl = th.where(
-            valid_exit, self.realized_pnl + exit_pnl - self.commission, self.realized_pnl
+            valid_exit, self.realized_pnl + exit_pnl - exit_comm, self.realized_pnl
         )
         self.pos_side = th.where(valid_exit, th.zeros_like(self.pos_side), self.pos_side)
         self.pos_size = th.where(valid_exit, th.zeros_like(self.pos_size), self.pos_size)
@@ -1130,8 +1134,9 @@ class NQWyckoffWeisVecEnv:
             self.close_price[self.day] + self.slip,
         )
         exit_pnl = self._compute_pnl(exit_price)
+        flatten_comm = self.commission * self.pos_size  # per-contract commission
         self.realized_pnl = th.where(
-            has_pos, self.realized_pnl + exit_pnl - self.commission, self.realized_pnl
+            has_pos, self.realized_pnl + exit_pnl - flatten_comm, self.realized_pnl
         )
         self.pos_side = th.where(done, th.zeros_like(self.pos_side), self.pos_side)
         self.pos_size = th.where(done, th.zeros_like(self.pos_size), self.pos_size)
