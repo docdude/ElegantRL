@@ -179,6 +179,7 @@ class NQWyckoffWeisEnv:
         overstay_bars: int = 20,
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
+        carry_cost: float = 0.0,
         pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
         bar_range: float = 40.0,
@@ -211,6 +212,7 @@ class NQWyckoffWeisEnv:
         self.overstay_bars = overstay_bars
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
+        self.carry_cost = carry_cost
         self.reward_clip = reward_clip
         self.random_start = random_start
         self.bar_range = bar_range
@@ -307,8 +309,11 @@ class NQWyckoffWeisEnv:
         mgmt_bonus = self._management_bonus(action)
         regime_penalty = self._regime_mismatch_penalty(action)
 
+        # Carry cost: per-bar cost of being positioned (encourages selectivity)
+        carry = self.carry_cost if (post_side != 0 and post_size > 0) else 0.0
+
         reward = (pnl_delta + entry_bonus + mgmt_bonus
-                  - penalty - regime_penalty) * self.reward_scale
+                  - penalty - regime_penalty - carry) * self.reward_scale
         if self.reward_clip > 0:
             reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
 
@@ -479,14 +484,12 @@ class NQWyckoffWeisEnv:
     # ─── Management bonus ─────────────────────────────────────────────────
 
     def _has_entry_signal(self) -> bool:
-        """Check if any Wyckoff event signal is active on the current bar."""
+        """Check if a primary Wyckoff event signal (spring/upthrust) is active."""
         feats = self.tech_ary[self._t]
         thr = self.event_threshold
         return bool(
-            feats[35] > thr or   # spring
-            feats[36] > thr or   # upthrust
-            feats[39] > thr or   # absorption
-            feats[41] > thr      # stopping action
+            feats[35] > thr or   # spring  (~1% of bars)
+            feats[36] > thr      # upthrust (~4% of bars)
         )
 
     def _management_bonus(self, action: int) -> float:
@@ -505,18 +508,31 @@ class NQWyckoffWeisEnv:
     # ─── Regime mismatch penalty ──────────────────────────────────────────
 
     def _regime_mismatch_penalty(self, action: int) -> float:
-        """Penalise entering against the dominant Wyckoff phase."""
+        """Penalise entering or holding against the dominant Wyckoff phase.
+
+        Fires on entry AND per bar while positioned against the dominant
+        phase.  The per-bar component uses half the scale so the agent
+        has time to exit rather than being crushed immediately.
+        """
         feats = self.tech_ary[self._t]
-        # Phase scores from 61-feature tech_ary
         bullish = max(feats[53], feats[54])   # accum / markup
         bearish = max(feats[55], feats[56])   # distrib / markdown
         scale = self.regime_penalty_scale
+        penalty = 0.0
 
+        # On entry
         if action == ACTION_ENTER_SHORT and bullish > 0.7:
-            return scale
+            penalty += scale
         if action == ACTION_ENTER_LONG and bearish > 0.7:
-            return scale
-        return 0.0
+            penalty += scale
+
+        # Per bar while positioned against phase (half scale)
+        if self._side > 0 and bearish > 0.7:
+            penalty += scale * 0.5
+        elif self._side < 0 and bullish > 0.7:
+            penalty += scale * 0.5
+
+        return penalty
 
     # ─── Observation ──────────────────────────────────────────────────────
 
@@ -604,6 +620,7 @@ class NQWyckoffWeisVecEnv:
         overstay_bars: int = 20,
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
+        carry_cost: float = 0.0,
         pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
         bar_range: float = 40.0,
@@ -648,6 +665,7 @@ class NQWyckoffWeisVecEnv:
         self.overstay_bars = overstay_bars
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
+        self.carry_cost = carry_cost
         self.reward_clip = reward_clip
         self.pnl_norm = pnl_norm  # $2000 default – 40pt 2-lot = 0.8 (no clip)
         self.bar_range = bar_range  # range bar size for ATR normalization
@@ -701,6 +719,7 @@ class NQWyckoffWeisVecEnv:
         self._diag_mgmt = 0.0
         self._diag_penalty = 0.0
         self._diag_regime = 0.0
+        self._diag_carry = 0.0
         self._diag_steps = 0
         self._diag_action_counts = th.zeros(N_ACTIONS, dtype=th.long, device=self.device)
         self._diag_episodes_done = 0
@@ -845,8 +864,14 @@ class NQWyckoffWeisVecEnv:
         mgmt_bonus = self._compute_management_bonus(action)
         regime_penalty = self._compute_regime_mismatch_penalty(action)
 
+        # Carry cost: per-bar cost of being positioned (encourages selectivity)
+        is_positioned = (post_side.abs() > 0) & (post_size > 0)
+        carry = th.where(is_positioned,
+                         th.tensor(self.carry_cost, device=self.device),
+                         th.tensor(0.0, device=self.device))
+
         reward = (pnl_delta + entry_bonus + mgmt_bonus
-                  - penalty - regime_penalty) * self.reward_scale
+                  - penalty - regime_penalty - carry) * self.reward_scale
         if self.reward_clip > 0:
             reward = th.clamp(reward, -self.reward_clip, self.reward_clip)
 
@@ -856,6 +881,7 @@ class NQWyckoffWeisVecEnv:
         self._diag_mgmt += mgmt_bonus.abs().mean().item()
         self._diag_penalty += penalty.abs().mean().item()
         self._diag_regime += regime_penalty.abs().mean().item()
+        self._diag_carry += carry.mean().item()
         self._diag_steps += 1
         # Action distribution tracking
         for a in range(N_ACTIONS):
@@ -1074,13 +1100,11 @@ class NQWyckoffWeisVecEnv:
                            & (self.unrealized_pnl < 0)
                            & (self.bars_in_trade > self.overstay_bars))
 
-        # Conditional idle penalty: only penalise HOLD when a setup exists
+        # Conditional idle penalty: only penalise HOLD when a primary setup exists
         thr = self.event_threshold
         spring   = self.tech_factor[self.day, self._col_spring] > thr
         upthrust = self.tech_factor[self.day, self._col_upthrust] > thr
-        absorb   = self.tech_factor[self.day, self._col_absorption] > thr
-        stopping = self.tech_factor[self.day, self._col_stopping] > thr
-        setup_present = spring | upthrust | absorb | stopping
+        setup_present = spring | upthrust  # ~5% of bars (was 37.5% with absorption+stopping)
         hold_on_setup = is_flat & (action == ACTION_HOLD) & setup_present
 
         bonus = th.where(hold_on_setup, bonus - self.idle_penalty, bonus)
@@ -1091,11 +1115,11 @@ class NQWyckoffWeisVecEnv:
     # ─── Regime mismatch penalty (vectorized) ─────────────────────────────
 
     def _compute_regime_mismatch_penalty(self, action):
-        """
-        Penalise entering against the dominant Wyckoff phase.
+        """Penalise entering or holding against the dominant Wyckoff phase.
 
-        -regime_penalty_scale if entering short while accum/markup > 0.7.
-        -regime_penalty_scale if entering long while distrib/markdown > 0.7.
+        Fires on entry AND per bar while positioned against the dominant
+        phase.  The per-bar component uses half the scale so the agent
+        has time to exit rather than being crushed immediately.
         """
         ne = self.num_envs
         penalty = th.zeros(ne, dtype=th.float32, device=self.device)
@@ -1110,13 +1134,17 @@ class NQWyckoffWeisVecEnv:
         bullish = th.maximum(phase_accum, phase_markup)
         bearish = th.maximum(phase_distrib, phase_markdown)
 
-        # Shorting in bullish phase
+        # On entry
         short_vs_bull = (action == ACTION_ENTER_SHORT) & (bullish > 0.7)
         penalty = th.where(short_vs_bull, penalty + scale, penalty)
-
-        # Longing in bearish phase
         long_vs_bear = (action == ACTION_ENTER_LONG) & (bearish > 0.7)
         penalty = th.where(long_vs_bear, penalty + scale, penalty)
+
+        # Per bar while positioned against phase (half scale)
+        long_in_bear = (self.pos_side > 0) & (bearish > 0.7)
+        penalty = th.where(long_in_bear, penalty + scale * 0.5, penalty)
+        short_in_bull = (self.pos_side < 0) & (bullish > 0.7)
+        penalty = th.where(short_in_bull, penalty + scale * 0.5, penalty)
 
         return penalty
 
@@ -1174,6 +1202,7 @@ class NQWyckoffWeisVecEnv:
         r_mgmt = self._diag_mgmt / n
         r_pen = self._diag_penalty / n
         r_regime = self._diag_regime / n
+        r_carry = self._diag_carry / n
 
         # Action distribution (%)
         total_actions = self._diag_action_counts.sum().item()
@@ -1200,7 +1229,7 @@ class NQWyckoffWeisVecEnv:
 
         # Brief stdout
         print(
-            f"[Diag] s={n} |pnl|={r_pnl:.4f} |ent|={r_entry:.4f} "
+            f"[Diag] s={n} |pnl|={r_pnl:.4f} |ent|={r_entry:.4f} carry={r_carry:.4f} "
             f"act=[H{act_pct[0]:.0f} EL{act_pct[1]:.0f} ES{act_pct[2]:.0f} "
             f"A{act_pct[3]:.0f} R{act_pct[4]:.0f} X{act_pct[5]:.0f}] "
             f"pos={pos_pct:.0f}% ep_pnl=${ep_pnl_mean:.0f}±{ep_pnl_std:.0f} "
