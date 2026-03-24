@@ -247,8 +247,10 @@ def evaluate_single_checkpoint(
         total_reward += reward
         last_info = info
         if discrete:
-            # equity = realized_pnl + unrealized_pnl
-            account_values.append(initial_amount + info.get('equity', 0.0))
+            # equity is in $ — convert to NQ points for consistent returns
+            # tick_value / tick_size = $5 / 0.25 = $20 per NQ point
+            equity_pts = info.get('equity', 0.0) / 20.0
+            account_values.append(initial_amount + equity_pts)
         else:
             account_values.append(env.total_asset)
 
