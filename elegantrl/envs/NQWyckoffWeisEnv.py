@@ -221,6 +221,11 @@ class NQWyckoffWeisEnv:
         # PnL normalisation – default $2000 so 40pt 2-lot = 0.8 (no clip)
         self.pnl_norm = pnl_norm
 
+        # Drift detrending: remove directional bias from dense PnL reward
+        # so the agent can't profit from unconditional long/short exposure
+        bar_changes = np.diff(self.close_ary.flatten())
+        self.drift_per_bar = float(np.mean(bar_changes)) if len(bar_changes) > 0 else 0.0
+
         # ElegantRL metadata
         self.state_dim = self.n_features + N_POSITION_FEATURES
         self.action_dim = N_ACTIONS
@@ -297,11 +302,13 @@ class NQWyckoffWeisEnv:
         # 4) Mark-to-market
         self._mark_to_market()
 
-        # 5) Reward — dense: position_exposure × price_change
+        # 5) Reward — dense: detrended position_exposure × price_change
+        #    Subtract average drift so unconditional long/short has 0 expected reward
         curr_price = float(self.close_ary[self._t])
         holding_pnl = 0.0
         if post_side != 0 and post_size > 0:
-            ticks = ((curr_price - prev_price) / self.tick_size) * post_side
+            detrended_change = (curr_price - prev_price) - self.drift_per_bar
+            ticks = (detrended_change / self.tick_size) * post_side
             holding_pnl = ticks * self.tick_value * post_size
         pnl_delta = holding_pnl / self.pnl_norm
 
@@ -671,6 +678,11 @@ class NQWyckoffWeisVecEnv:
         self.bar_range = bar_range  # range bar size for ATR normalization
         self.gamma = gamma
 
+        # Drift detrending: remove directional bias from dense PnL reward
+        bar_changes = np.diff(close_ary.flatten())
+        drift = float(np.mean(bar_changes)) if len(bar_changes) > 0 else 0.0
+        self.drift_per_bar = th.tensor(drift, dtype=th.float32, device=self.device)
+
         # ── ElegantRL metadata ───────────────────────────────────────────
         self.env_name = "NQWyckoffWeisVecEnv-v1"
         self.num_envs = num_envs
@@ -856,7 +868,9 @@ class NQWyckoffWeisVecEnv:
             prev_price,
         )
         price_change = curr_price - baseline
-        ticks = (price_change / self.tick_size) * post_side
+        # Detrend: subtract average drift so unconditional long/short → 0 expected reward
+        detrended_change = price_change - self.drift_per_bar
+        ticks = (detrended_change / self.tick_size) * post_side
         holding_pnl = ticks * self.tick_value * post_size
         pnl_delta = holding_pnl / self.pnl_norm
 
