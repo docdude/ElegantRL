@@ -297,6 +297,7 @@ class NQWyckoffWeisEnv:
         # Snapshot pre-action state for reward gating
         prev_price = float(self.close_ary[self._t])
         prev_side = self._side  # needed to gate entry bonus
+        prev_realized = self._realized  # for sparse exit reward
 
         # 1) Execute action at current bar close
         penalty = self._execute(action)
@@ -306,6 +307,9 @@ class NQWyckoffWeisEnv:
         post_side = self._side
         post_size = self._size
 
+        # Sparse exit reward: realized PnL only on trade close/reduce
+        exit_pnl = (self._realized - prev_realized) / self.pnl_norm
+
         # 3) Advance bar
         self._t += 1
         self._step += 1
@@ -313,8 +317,10 @@ class NQWyckoffWeisEnv:
         # 4) Mark-to-market
         self._mark_to_market()
 
-        # 5) Reward — dense: detrended position_exposure × price_change
-        #    Subtract average drift so unconditional long/short has 0 expected reward
+        # 5) Reward — sparse exit PnL + shaping signals
+        #    Dense per-step PnL removed: it causes position-maximization.
+        #    PnL only realized on EXIT/REDUCE via exit_pnl above.
+        #    Dense pnl_delta kept for diagnostics only (not in reward).
         curr_price = float(self.close_ary[self._t])
         holding_pnl = 0.0
         if post_side != 0 and post_size > 0:
@@ -346,7 +352,7 @@ class NQWyckoffWeisEnv:
         # Carry cost: per-bar cost scaled by position size (1 lot = 1×, 2 lots = 2×)
         carry = self.carry_cost * post_size
 
-        reward = (pnl_delta + vesting_bonus + mgmt_bonus
+        reward = (exit_pnl + vesting_bonus + mgmt_bonus
                   - penalty - regime_penalty - carry) * self.reward_scale
         if self.reward_clip > 0:
             reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
@@ -769,6 +775,7 @@ class NQWyckoffWeisVecEnv:
 
         # Reward component diagnostics (running sums for logging)
         self._diag_pnl = 0.0
+        self._diag_exit_pnl = 0.0
         self._diag_entry = 0.0
         self._diag_mgmt = 0.0
         self._diag_penalty = 0.0
@@ -802,7 +809,7 @@ class NQWyckoffWeisVecEnv:
 
         # Startup banner — confirms new code is loaded
         print(
-            f"[VecEnv] pnl_norm={self.pnl_norm} "
+            f"[VecEnv] SPARSE_EXIT pnl_norm={self.pnl_norm} "
             f"drift_per_bar=local_rolling_50 "
             f"drift_mean={self.drift_per_bar.mean().item():.4f}pts "
             f"drift_std={self.drift_per_bar.std().item():.4f}pts "
@@ -897,6 +904,7 @@ class NQWyckoffWeisVecEnv:
         # 1) Snapshot pre-action state for reward gating
         prev_price = self.close_price[self.day]
         prev_side = self.pos_side.clone()  # needed to gate entry bonus
+        prev_realized = self.realized_pnl.clone()  # for sparse exit reward
 
         # 2) Execute discrete actions
         penalty = self._execute_actions(action)
@@ -906,6 +914,9 @@ class NQWyckoffWeisVecEnv:
         post_side = self.pos_side.clone()
         post_size = self.pos_size.clone()
 
+        # Sparse exit reward: realized PnL only on trade close/reduce
+        exit_pnl = (self.realized_pnl - prev_realized) / self.pnl_norm
+
         # 4) Advance bar
         self.day = th.clamp(self.day + 1, max=self.max_step)
         self.step_count += 1
@@ -913,9 +924,10 @@ class NQWyckoffWeisVecEnv:
         # 5) Mark-to-market
         self._mark_to_market()
 
-        # 6) Reward — dense: position_exposure × price_change
-        #    For entry bars, use fill price (not bar close) as baseline
-        #    to avoid phantom edge from ignoring slippage in the reward.
+        # 6) Reward — sparse exit PnL + shaping signals
+        #    Dense per-step PnL removed: it causes position-maximization.
+        #    PnL only realized on EXIT/REDUCE via exit_pnl above.
+        #    Dense pnl_delta kept for diagnostics only (not in reward).
         curr_price = self.close_price[self.day]
         just_entered = (action == ACTION_ENTER_LONG) | (action == ACTION_ENTER_SHORT)
         was_flat = (prev_price == self.entry_price)  # stale check
@@ -963,13 +975,14 @@ class NQWyckoffWeisVecEnv:
         # Carry cost: per-bar cost scaled by position size (1 lot = 1×, 2 lots = 2×)
         carry = self.carry_cost * post_size
 
-        reward = (pnl_delta + entry_bonus + mgmt_bonus
+        reward = (exit_pnl + entry_bonus + mgmt_bonus
                   - penalty - regime_penalty - carry) * self.reward_scale
         if self.reward_clip > 0:
             reward = th.clamp(reward, -self.reward_clip, self.reward_clip)
 
         # Reward component diagnostics
         self._diag_pnl += pnl_delta.abs().mean().item()
+        self._diag_exit_pnl += exit_pnl.abs().mean().item()
         self._diag_entry += entry_bonus.abs().mean().item()
         self._diag_mgmt += mgmt_bonus.abs().mean().item()
         self._diag_penalty += penalty.abs().mean().item()
@@ -1297,6 +1310,7 @@ class NQWyckoffWeisVecEnv:
 
         # Reward components (running averages)
         r_pnl = self._diag_pnl / n
+        r_exit = self._diag_exit_pnl / n
         r_entry = self._diag_entry / n
         r_mgmt = self._diag_mgmt / n
         r_pen = self._diag_penalty / n
@@ -1328,7 +1342,7 @@ class NQWyckoffWeisVecEnv:
 
         # Brief stdout
         print(
-            f"[Diag] s={n} |pnl|={r_pnl:.4f} |ent|={r_entry:.4f} carry={r_carry:.4f} "
+            f"[Diag] s={n} |pnl|={r_pnl:.4f} |exit|={r_exit:.4f} |ent|={r_entry:.4f} carry={r_carry:.4f} "
             f"act=[H{act_pct[0]:.0f} EL{act_pct[1]:.0f} ES{act_pct[2]:.0f} "
             f"A{act_pct[3]:.0f} R{act_pct[4]:.0f} X{act_pct[5]:.0f}] "
             f"pos={pos_pct:.0f}% ep_pnl=${ep_pnl_mean:.0f}±{ep_pnl_std:.0f} "
