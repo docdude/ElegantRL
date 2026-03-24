@@ -342,7 +342,7 @@ class NQWyckoffWeisEnv:
         # Carry cost: per-bar cost of being positioned (encourages selectivity)
         carry = self.carry_cost if (post_side != 0 and post_size > 0) else 0.0
 
-        reward = (vesting_bonus + mgmt_bonus
+        reward = (pnl_delta + vesting_bonus + mgmt_bonus
                   - penalty - regime_penalty - carry) * self.reward_scale
         if self.reward_clip > 0:
             reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
@@ -798,7 +798,7 @@ class NQWyckoffWeisVecEnv:
 
         # Startup banner — confirms new code is loaded
         print(
-            f"[VecEnv] reward_mode=SHAPED (no PnL in reward) "
+            f"[VecEnv] pnl_norm={self.pnl_norm} "
             f"drift_per_bar=local_rolling_50 "
             f"drift_mean={self.drift_per_bar.mean().item():.4f}pts "
             f"drift_std={self.drift_per_bar.std().item():.4f}pts "
@@ -958,7 +958,7 @@ class NQWyckoffWeisVecEnv:
                          th.tensor(self.carry_cost, device=self.device),
                          th.tensor(0.0, device=self.device))
 
-        reward = (entry_bonus + mgmt_bonus
+        reward = (pnl_delta + entry_bonus + mgmt_bonus
                   - penalty - regime_penalty - carry) * self.reward_scale
         if self.reward_clip > 0:
             reward = th.clamp(reward, -self.reward_clip, self.reward_clip)
