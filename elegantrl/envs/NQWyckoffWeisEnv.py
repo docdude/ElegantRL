@@ -327,11 +327,9 @@ class NQWyckoffWeisEnv:
         # On entry with valid signal, store the bonus; pay it only after
         # the agent has held for vesting_bars (forfeit if exiting early)
         raw_entry_bonus = self._entry_bonus(action)
-        # Gate: only award bonus when actually entering (not already positioned same direction)
-        if action == ACTION_ENTER_LONG and prev_side == 1:
-            raw_entry_bonus = 0.0  # already long, no bonus
-        elif action == ACTION_ENTER_SHORT and prev_side == -1:
-            raw_entry_bonus = 0.0  # already short, no bonus
+        # Gate: only award bonus when entering from FLAT (prevent flip farming)
+        if prev_side != 0:
+            raw_entry_bonus = 0.0
         if raw_entry_bonus > 0 and self.vesting_bars > 0:
             self._vesting_drip = raw_entry_bonus  # deferred amount
             self._vesting_remaining = self.vesting_bars
@@ -938,12 +936,9 @@ class NQWyckoffWeisVecEnv:
         # On entry with valid signal, store the bonus; pay it only after
         # the agent has held for vesting_bars (forfeit if exiting early)
         raw_entry_bonus = self._compute_entry_bonus(action)
-        # Gate: only award bonus when actually entering (not already positioned same direction)
-        actually_entered = (
-            ((action == ACTION_ENTER_LONG) & (prev_side != 1))
-            | ((action == ACTION_ENTER_SHORT) & (prev_side != -1))
-        )
-        raw_entry_bonus = th.where(actually_entered, raw_entry_bonus, th.zeros_like(raw_entry_bonus))
+        # Gate: only award bonus when entering from FLAT (prevent flip farming)
+        was_flat = prev_side == 0
+        raw_entry_bonus = th.where(was_flat, raw_entry_bonus, th.zeros_like(raw_entry_bonus))
         has_new_bonus = raw_entry_bonus > 0
         if has_new_bonus.any():
             self.vesting_amount = th.where(has_new_bonus, raw_entry_bonus, self.vesting_amount)
