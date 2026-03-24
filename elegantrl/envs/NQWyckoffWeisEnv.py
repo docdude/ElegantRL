@@ -751,6 +751,15 @@ class NQWyckoffWeisVecEnv:
                 f"episode_len={episode_len} bars={len(close_ary)} "
                 f"entry_bonus={entry_bonus_scale} pnl_norm={pnl_norm}\n"
             )
+
+        # Startup banner — confirms new code is loaded
+        print(
+            f"[VecEnv] drift_per_bar={self.drift_per_bar.item():.4f}pts "
+            f"carry_cost={self.carry_cost} idle_penalty={self.idle_penalty} "
+            f"entry_bonus={self.entry_bonus_scale} regime_penalty={self.regime_penalty_scale} "
+            f"bars={self.close_price.shape[0]} num_envs={num_envs}",
+            flush=True,
+        )
             self._flog.write(
                 "step,|pnl|,|entry|,|mgmt|,|pen|,|regime|,"
                 "H%,EL%,ES%,A%,R%,X%,"
