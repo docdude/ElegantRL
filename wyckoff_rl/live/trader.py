@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .range_bar_builder import RangeBarBuilder
-from .live_features import LiveFeatureEngine, TRAINING_FEATURE_INDICES
+from .live_features import LiveFeatureEngine, TRAINING_FEATURE_INDICES, LEGACY_TRAINING_INDICES
 from .inference import InferenceEngine
 from .adapters import (
     DataAdapter, OrderAdapter,
@@ -51,11 +51,18 @@ from ..feature_config import ALL_FEATURES
 
 logger = logging.getLogger("wyckoff_trader")
 
-# Feature name → index in the training-feature vector (36 features)
-FEATURE_NAME_TO_IDX = {
-    ALL_FEATURES[all_idx]: train_idx
-    for train_idx, all_idx in enumerate(TRAINING_FEATURE_INDICES)
-}
+
+def _build_feature_name_map(feature_indices):
+    """Build feature_name → offset map for a given set of selected indices."""
+    return {
+        ALL_FEATURES[all_idx]: train_idx
+        for train_idx, all_idx in enumerate(feature_indices)
+        if all_idx < len(ALL_FEATURES)
+    }
+
+
+# Default mapping (new 49-feature set)
+FEATURE_NAME_TO_IDX = _build_feature_name_map(TRAINING_FEATURE_INDICES)
 
 # Pre-validated veto presets discovered via discover_veto.py (2026-03-22)
 # Each preset: list of (feature_name, operator, threshold) — OR logic
@@ -98,10 +105,11 @@ class VetoFilter:
     Only vetoes entries (from flat); never prevents exits.
     """
 
-    def __init__(self, rules: list[tuple[str, str, float]]):
+    def __init__(self, rules: list[tuple[str, str, float]], feature_name_map=None):
+        name_map = feature_name_map or FEATURE_NAME_TO_IDX
         self._rules = []
         for feat_name, op, thresh in rules:
-            idx = FEATURE_NAME_TO_IDX.get(feat_name)
+            idx = name_map.get(feat_name)
             if idx is None:
                 raise ValueError(f"Unknown feature: {feat_name}")
             if op not in (">", "<"):
@@ -164,6 +172,7 @@ class WyckoffTrader:
         max_contracts: int = 1,
         log_dir: str = "live_logs",
         veto_rules: list[tuple[str, str, float]] | None = None,
+        legacy: bool = False,
     ):
         self.data_adapter = data_adapter
         self.order_adapter = order_adapter
@@ -174,7 +183,12 @@ class WyckoffTrader:
         self.initial_amount = initial_amount
         self._running = False
 
-        feat_idx = feature_indices or TRAINING_FEATURE_INDICES
+        if feature_indices is not None:
+            feat_idx = feature_indices
+        elif legacy:
+            feat_idx = LEGACY_TRAINING_INDICES
+        else:
+            feat_idx = TRAINING_FEATURE_INDICES
 
         # 1. Range Bar Builder
         self.bar_builder = RangeBarBuilder(
@@ -187,6 +201,7 @@ class WyckoffTrader:
             buffer_size=200,
             feature_indices=feat_idx,
             reversal_points=range_size * reversal_mult,
+            legacy=legacy,
         )
 
         # 3. Inference Engine
@@ -211,8 +226,9 @@ class WyckoffTrader:
         self._total_pnl: float = 0.0
         self._trade_log_path: str = ""
 
-        # Veto filter
-        self.veto_filter = VetoFilter(veto_rules) if veto_rules else None
+        # Veto filter (uses the active feature indices for correct offset mapping)
+        feat_name_map = _build_feature_name_map(feat_idx)
+        self.veto_filter = VetoFilter(veto_rules, feat_name_map) if veto_rules else None
 
         # Wire data adapter callback
         self.data_adapter.on_tick = self._on_tick
@@ -276,9 +292,45 @@ class WyckoffTrader:
                 return
 
         # 5. Execute position change
-        delta = int(round(target_pos - self._position))
-        if delta != 0:
-            self._execute_trade(delta, bar.close, raw_action, bar)
+        if self.inference.continuous_sizing:
+            old_position = self._position
+            pos_change = abs(target_pos - old_position)
+            if pos_change > 1e-6:
+                # Realize P&L on closing portion of old position
+                pnl = 0.0
+                if abs(old_position) > 1e-6:
+                    pnl_pts = (bar.close - self._entry_price) * (1 if old_position > 0 else -1)
+                    if (old_position > 0 and target_pos < old_position) or \
+                       (old_position < 0 and target_pos > old_position):
+                        closed_frac = min(abs(old_position),
+                                          abs(target_pos - old_position))
+                        pnl = closed_frac * pnl_pts * 20.0  # NQ $20/point
+
+                self._position = target_pos
+                if abs(self._position) > 1e-6:
+                    self._entry_price = bar.close
+                else:
+                    self._entry_price = 0.0
+                self._n_trades += 1
+                self._total_pnl += pnl
+                self._cash += pnl / 20.0
+
+                action = "BUY" if target_pos > old_position else "SELL"
+                if pnl != 0:
+                    logger.info(f"  → {action} {pos_change:.3f} @ {bar.close:.2f} | "
+                                f"PnL: ${pnl:+,.2f} | Total: ${self._total_pnl:+,.2f}")
+
+                # Place order for the net integer delta (round to nearest contract)
+                int_delta = int(round(target_pos)) - int(round(old_position))
+                if int_delta != 0:
+                    self.order_adapter.place_order(int_delta, bar.close)
+
+                self._log_trade(action, pos_change, bar.close, target_pos,
+                                pnl, raw_action, bar)
+        else:
+            delta = int(round(target_pos - self._position))
+            if delta != 0:
+                self._execute_trade(delta, bar.close, raw_action, bar)
 
     def _execute_trade(self, delta: int, price: float, raw_action: float, bar):
         """Execute a trade through the order adapter."""
@@ -319,10 +371,10 @@ class WyckoffTrader:
             "bar_close": bar.close,
             "raw_action": f"{raw_action:.6f}",
             "action": action,
-            "quantity": qty,
-            "position_after": pos_after,
-            "pnl_realized_usd": f"{pnl:.2f}",
-            "total_pnl_usd": f"{self._total_pnl:.2f}",
+            "quantity": f"{qty:.3f}" if isinstance(qty, float) else qty,
+            "position_after": f"{pos_after:.3f}" if isinstance(pos_after, float) else pos_after,
+            "pnl_realized_usd": f"{pnl:+.2f}",
+            "total_pnl_usd": f"{self._total_pnl:+.2f}",
             "equity": f"{self.order_adapter.get_account_value():.2f}",
         }
         file_exists = os.path.exists(self._trade_log_path)
@@ -351,6 +403,8 @@ class WyckoffTrader:
         logger.info(f"State dim:  {self.inference.state_dim}")
         logger.info(f"Sizing:     {'continuous' if self.inference.continuous_sizing else 'binary'}")
         logger.info(f"Max pos:    {self.max_contracts} contracts")
+        if self.feature_engine.legacy:
+            logger.info(f"Features:   LEGACY (pre-audit formulas)")
         if self.veto_filter:
             logger.info(f"Veto:       {self.veto_filter.describe()}")
         logger.info(f"Trade log:  {self._trade_log_path}")
@@ -463,6 +517,8 @@ Examples:
     common.add_argument("--veto-preset", type=str, default=None,
                         choices=list(VETO_PRESETS.keys()),
                         help="Named veto filter preset (e.g. split3, split4)")
+    common.add_argument("--legacy", action="store_true",
+                        help="Use pre-audit feature formulas (for models trained before 2026-03-23)")
 
     # — replay ————————————————————————————————————————————————————
     p_replay = sub.add_parser("replay", parents=[common],
@@ -560,6 +616,7 @@ Examples:
         max_contracts=args.max_contracts,
         log_dir=args.log_dir,
         veto_rules=veto_rules,
+        legacy=args.legacy,
     )
     trader.start()
 

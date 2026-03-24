@@ -160,7 +160,7 @@ def train_split(
 
     # Compute dims
     if is_nq_discrete:
-        state_dim = N_ENV_FEATURES + N_POSITION_FEATURES   # 38 + 8 = 46
+        state_dim = N_ENV_FEATURES + N_POSITION_FEATURES   # 49 + 8 = 57
         action_dim = N_ACTIONS                              # 6
     else:
         feature_indices = env_params.get('feature_indices', None)

@@ -1,4 +1,9 @@
 """
+LEGACY Wyckoff-Weis Wave Feature Engineering — frozen pre-audit snapshot.
+
+Extracted from commit fc1db749 (before 9ccc522f audit fixes).
+Use this for inference on models trained before 2026-03-23.
+
 Wyckoff-Weis Wave Feature Engineering — 65 features across 5 blocks.
 
 Block 1: Bar Microstructure       (~15 features)
@@ -18,8 +23,6 @@ Design principles:
 """
 
 import logging
-import os
-import sys
 import numpy as np
 import pandas as pd
 from typing import Tuple, List
@@ -30,21 +33,6 @@ logger = logging.getLogger(__name__)
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 EPSILON = 1e-8
-
-# ─── srl-python-indicators library (NoLag_HighLow zigzag) ───────────────────
-try:
-    _SRL_LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 '..', '..', 'srl-python-indicators')
-    if os.path.isdir(_SRL_LIB_PATH) and _SRL_LIB_PATH not in sys.path:
-        sys.path.insert(0, _SRL_LIB_PATH)
-    from weis_wyckoff_system import WeisWyckoffSystem as _LibWWS
-    from models_utils.ww_models import (
-        ZigZagInit as _LibZigZagInit,
-        ZigZagMode as _LibZigZagMode,
-    )
-    _HAS_WW_LIB = True
-except ImportError:
-    _HAS_WW_LIB = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,8 +205,7 @@ def compute_block1_microstructure(df: pd.DataFrame) -> pd.DataFrame:
     returns_raw = _safe_div(np.diff(c, prepend=c[0]), c)
     volatility_20 = _rolling_std(returns_raw, 20)
     # Normalize: tanh so it's bounded
-    # Multiplier calibrated so p10→~0.2, p90→~0.8 for NQ range bars
-    vol_20_norm = np.tanh(volatility_20 * 500)
+    vol_20_norm = np.tanh(volatility_20 * 200)
 
     result = pd.DataFrame({
         "body_ratio": body_ratio,
@@ -252,10 +239,10 @@ def _segment_waves(
     low: np.ndarray,
     volume: np.ndarray,
     delta: np.ndarray,
-    reversal_points: float = 120.0,
+    reversal_points: float = 40.0,
 ) -> dict:
     """
-    Weis Wave ZigZag segmentation (points-based reversal, 3x bar size).
+    Weis Wave ZigZag segmentation (points-based reversal for 40pt NQ bars).
 
     Returns dict of arrays: wave_dir, wave_id, wave_high, wave_low,
                             wave_vol, wave_delta, wave_start_idx
@@ -329,109 +316,6 @@ def _segment_waves(
         "wave_vol": wave_vol,
         "wave_delta": wave_delta,
     }
-
-
-def _segment_waves_nolag(df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
-    """
-    Weis Wave segmentation using srl-python-indicators NoLag_HighLow zigzag.
-
-    Uses structural bar-to-bar H/L pivots (the standard Weis methodology)
-    instead of the crude points-based reversal. Produces ~10x more pivots.
-
-    Returns
-    -------
-    waves : dict
-        Same interface as _segment_waves(): wave_dir, wave_id, wave_high,
-        wave_low, wave_vol, wave_delta — all dense (n,) arrays.
-    lib_df : pd.DataFrame
-        Library's full_analysis() result for reuse by Block 6.
-    """
-    if not _HAS_WW_LIB:
-        raise ImportError("srl-python-indicators required for NoLag_HighLow")
-
-    n = len(df)
-
-    # Prepare DataFrame for library
-    lib_df = df[['open', 'high', 'low', 'close', 'volume']].copy()
-    if 'datetime' not in lib_df.columns:
-        lib_df['datetime'] = lib_df.index
-
-    wws = _LibWWS()
-    zz = _LibZigZagInit(_LibZigZagMode.NoLag_HighLow)
-    lib_df = wws.full_analysis(lib_df, None, None, zigzag_init=zz)
-
-    # ── Extract pivot locations and determine wave boundaries ──
-    pivot_mask = lib_df['end_wave'].notna()
-    pivot_locs = np.where(pivot_mask.values)[0]
-    end_wave_prices = lib_df['end_wave'].values
-
-    high = df['high'].values.astype(np.float64)
-    low = df['low'].values.astype(np.float64)
-    close = df['close'].values.astype(np.float64)
-    volume = df['volume'].values.astype(np.float64)
-    delta = df.get('delta', pd.Series(np.zeros(n))).values.astype(np.float64)
-
-    wave_dir = np.ones(n, dtype=np.float64)
-    wave_id = np.zeros(n, dtype=np.int32)
-    wave_high = np.zeros(n, dtype=np.float64)
-    wave_low = np.zeros(n, dtype=np.float64)
-    wave_vol = np.zeros(n, dtype=np.float64)
-    wave_delta = np.zeros(n, dtype=np.float64)
-
-    if len(pivot_locs) < 2:
-        # Not enough pivots — return defaults
-        wave_high[:] = high
-        wave_low[:] = low
-        wave_vol[:] = np.cumsum(volume)
-        wave_delta[:] = np.cumsum(delta)
-        return {"wave_dir": wave_dir, "wave_id": wave_id,
-                "wave_high": wave_high, "wave_low": wave_low,
-                "wave_vol": wave_vol, "wave_delta": wave_delta}, lib_df
-
-    # Determine direction of first wave from first pivot's end_wave price.
-    # end_wave ≈ bar high → UP peak (wave was up), end_wave ≈ bar low → DOWN valley
-    ew0 = end_wave_prices[pivot_locs[0]]
-    first_dir = 1.0 if abs(ew0 - high[pivot_locs[0]]) < abs(ew0 - low[pivot_locs[0]]) else -1.0
-
-    # ── Build dense arrays per wave segment ──
-    cur_dir = first_dir
-    for w in range(len(pivot_locs)):
-        seg_start = 0 if w == 0 else pivot_locs[w - 1] + 1
-        seg_end = pivot_locs[w] + 1  # inclusive of pivot bar
-
-        wave_dir[seg_start:seg_end] = cur_dir
-
-        wave_id[seg_start:seg_end] = w
-
-        # Accumulate volume and delta within wave segment
-        seg_vol = np.cumsum(volume[seg_start:seg_end])
-        seg_delta = np.cumsum(delta[seg_start:seg_end])
-        wave_vol[seg_start:seg_end] = seg_vol
-        wave_delta[seg_start:seg_end] = seg_delta
-
-        # Running high/low within wave segment
-        seg_high = np.maximum.accumulate(high[seg_start:seg_end])
-        seg_low = np.minimum.accumulate(low[seg_start:seg_end])
-        wave_high[seg_start:seg_end] = seg_high
-        wave_low[seg_start:seg_end] = seg_low
-
-        cur_dir = -cur_dir
-
-    # After last pivot: new wave in progress
-    last_end = pivot_locs[-1] + 1
-    if last_end < n:
-        wave_dir[last_end:] = cur_dir
-        wave_id[last_end:] = len(pivot_locs)
-        tail_vol = np.cumsum(volume[last_end:])
-        tail_delta = np.cumsum(delta[last_end:])
-        wave_vol[last_end:] = tail_vol
-        wave_delta[last_end:] = tail_delta
-        wave_high[last_end:] = np.maximum.accumulate(high[last_end:])
-        wave_low[last_end:] = np.minimum.accumulate(low[last_end:])
-
-    return {"wave_dir": wave_dir, "wave_id": wave_id,
-            "wave_high": wave_high, "wave_low": wave_low,
-            "wave_vol": wave_vol, "wave_delta": wave_delta}, lib_df
 
 
 def _compute_completed_wave_stats(wave_id, wave_dir, wave_vol,
@@ -669,17 +553,14 @@ def _compute_supply_demand_balance(wave_id, wave_dir, wave_vol, wave_high, wave_
     }
 
 
-def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 120.0) -> pd.DataFrame:
+def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 40.0) -> pd.DataFrame:
     """
     Compute Weis Wave features: wave segmentation + wave-to-wave comparison.
-
-    Uses NoLag_HighLow structural zigzag (srl-python-indicators) when
-    available, falling back to the crude points-based zigzag otherwise.
 
     Parameters
     ----------
     reversal_points : float
-        ZigZag reversal threshold in price points (fallback only).
+        ZigZag reversal threshold in price points (40 for NQ 40pt range bars).
     """
     c = df["close"].values.astype(np.float64)
     h = df["high"].values.astype(np.float64)
@@ -687,18 +568,13 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 120.0) -
     vol = df["volume"].values.astype(np.float64)
     delta = df.get("delta", pd.Series(np.zeros(len(df)))).values.astype(np.float64)
 
-    # Segment waves — prefer library NoLag_HighLow when available
-    lib_df = None
-    if _HAS_WW_LIB:
-        waves, lib_df = _segment_waves_nolag(df)
-        logger.info("Block 2: using NoLag_HighLow zigzag from srl-python-indicators")
-    else:
-        waves = _segment_waves(c, h, l, vol, delta, reversal_points)
-        logger.info("Block 2: falling back to points-based zigzag")
+    # Segment waves
+    waves = _segment_waves(c, h, l, vol, delta, reversal_points)
 
     # Current wave features
     wave_disp = np.abs(waves["wave_high"] - waves["wave_low"])
     avg_wave_vol = _rolling_mean(waves["wave_vol"], 50)
+    avg_wave_len_approx = 20.0  # approximate bars per wave for progress
 
     # Wave displacement in bars (count bars in current wave)
     wave_bars = np.zeros(len(c))
@@ -710,11 +586,6 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 120.0) -
             last_id = waves["wave_id"][i]
         count += 1
         wave_bars[i] = count
-
-    # Compute actual average wave length from data (was hardcoded at 20.0)
-    n_waves = waves["wave_id"][-1] - waves["wave_id"][0] + 1
-    avg_wave_len = len(c) / max(n_waves, 1)
-    logger.info(f"Average wave length: {avg_wave_len:.1f} bars ({n_waves} waves)")
 
     # Wave-to-wave comparisons
     comp = _compute_completed_wave_stats(
@@ -781,7 +652,7 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 120.0) -
     result = pd.DataFrame({
         # Current wave state (5)
         "wave_direction": waves["wave_dir"],
-        "wave_progress": np.clip(wave_bars / avg_wave_len, 0, 5.0),
+        "wave_progress": np.clip(wave_bars / avg_wave_len_approx, 0, 5.0),
         "wave_displacement_norm": np.clip(wave_disp / atr, 0, 5.0),
         "wave_vol_cumulative_norm": np.clip(_safe_div(waves["wave_vol"], avg_wave_vol), 0, 5.0),
         "wave_delta_ratio": np.clip(_safe_div(waves["wave_delta"], np.maximum(waves["wave_vol"], EPSILON)), -1, 1),
@@ -809,11 +680,9 @@ def compute_block2_weis_wave(df: pd.DataFrame, reversal_points: float = 120.0) -
     result.attrs["_wave_effort_result_raw"] = wave_effort_result_raw
     result.attrs["_wave_time_norm"] = wave_time_norm
     result.attrs["_wave_velocity_norm"] = wave_velocity_norm
-    if lib_df is not None:
-        result.attrs["_lib_df"] = lib_df
 
-    zz_mode = "NoLag_HighLow" if lib_df is not None else f"points({reversal_points})"
-    logger.info(f"Block 2 (Weis Wave): {result.shape[1]} features, zigzag={zz_mode}")
+    logger.info(f"Block 2 (Weis Wave): {result.shape[1]} features computed, "
+                f"reversal={reversal_points}pts")
     return result
 
 
@@ -873,14 +742,8 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     spring_delta = np.clip(delta_ratio, 0, 1)  # positive delta = buying
     # Wave exhaustion: previous down-waves declining in vol (< 1 = exhaustion)
     wave_exhaust_down = np.clip(1.0 - np.minimum(wave_vol_same, 1.0), 0, 1)
-    # Wave exhaustion for up-waves (needed for upthrust)
-    wave_exhaust_up = np.clip(1.0 - np.minimum(wave_vol_same, 1.0), 0, 1)
-    # Override: for up-wave bars use up-wave exhaustion from separate tracker
-    # wave_vol_same tracks same-direction, so up-bar exhaustion is already captured
     spring_score = np.clip(
-        np.sqrt(spring_penetration) * spring_recovery
-        * (0.5 + 0.3 * spring_delta + 0.2 * wave_exhaust_down),
-        0, 1
+        spring_penetration * spring_recovery * (0.5 + 0.5 * spring_delta), 0, 1
     )
 
     # UPTHRUST: high > swing_high_prev, close rejects, delta negative
@@ -891,9 +754,7 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     ut_rejection = 1.0 - ut_rejection  # invert: close near low = strong rejection
     ut_delta = np.clip(-delta_ratio, 0, 1)  # negative delta = selling
     upthrust_score = np.clip(
-        np.sqrt(ut_penetration) * ut_rejection
-        * (0.5 + 0.3 * ut_delta + 0.2 * wave_exhaust_up),
-        0, 1
+        ut_penetration * ut_rejection * (0.5 + 0.5 * ut_delta), 0, 1
     )
 
     # SELLING CLIMAX: vol spike + close near low + delta positive (absorption)
@@ -911,9 +772,9 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     er_bar = _safe_div(np.abs(np.diff(c, prepend=c[0])), np.maximum(vol, EPSILON))
     er_mean = _rolling_mean(er_bar, 20)
     er_ratio_bar = _safe_div(er_bar, er_mean)
-    # Absorption: vol high + ER low (tightened: 2× avg vol, ER < 0.3× avg)
-    abs_vol_component = np.clip((vol_ratio - 1.5) / 1.0, 0, 1)  # 2.5× → 1.0
-    abs_er_component = np.clip(1.0 - er_ratio_bar / 0.3, 0, 1)  # ER<0.3 → 1.0
+    # Absorption: vol high + ER low
+    abs_vol_component = np.clip((vol_ratio - 1.0) / 0.5, 0, 1)  # 1.5× → 1.0
+    abs_er_component = np.clip(1.0 - er_ratio_bar / 0.5, 0, 1)  # ER<0.5 → 1.0
     absorption_score = np.clip(abs_vol_component * abs_er_component, 0, 1)
     absorption_direction = np.where(
         absorption_score > 0.3,
@@ -924,11 +785,9 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     # STOPPING ACTION (wave level): large wave vol + small displacement
     large_wave = b2["large_wave_score"].values if "large_wave_score" in b2 else np.ones(n)
     wave_disp = b2["wave_displacement_norm"].values if "wave_displacement_norm" in b2 else np.ones(n)
-    # High effort (>2× avg vol) + small result (<0.3× avg displacement)
-    # Calibrated for 40pt NQ range bars where waves avg ~6 bars and
-    # displacement is naturally small (median 0.064).
-    stopping_vol = np.clip((large_wave - 2.0) / 1.0, 0, 1)   # 3.0× → 1.0
-    stopping_disp = np.clip(1.0 - wave_disp / 0.3, 0, 1)     # disp<0.3 → 1.0
+    # High effort (>1.5× avg vol) + small result (<0.5× avg displacement)
+    stopping_vol = np.clip((large_wave - 1.0) / 1.0, 0, 1)
+    stopping_disp = np.clip(1.0 - wave_disp / 1.0, 0, 1)
     stopping_action_score = np.clip(stopping_vol * stopping_disp, 0, 1)
 
     # ---- Event-relative temporal features ----
@@ -1114,13 +973,6 @@ def compute_block4_context(df: pd.DataFrame, b2: pd.DataFrame,
         0, 1
     )
 
-    # Normalize phase scores so they form a proper distribution (sum ≈ 1)
-    phase_sum = phase_accum + phase_markup + phase_distrib + phase_markdown + EPSILON
-    phase_accum = phase_accum / phase_sum
-    phase_markup = phase_markup / phase_sum
-    phase_distrib = phase_distrib / phase_sum
-    phase_markdown = phase_markdown / phase_sum
-
     # Higher timeframe trend (4× structure)
     trend_4x = np.tanh(_linreg_slope(c, 80) / (np.std(c) / 80 + EPSILON))
 
@@ -1142,142 +994,12 @@ def compute_block4_context(df: pd.DataFrame, b2: pd.DataFrame,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Block 6: Library Weis Wave features (NoLag_HighLow structural zigzag)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compute_block6_library_weis(df: pd.DataFrame, lib_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    """
-    Block 6: Features from srl-python-indicators library.
-
-    Uses the library's NoLag_HighLow zigzag (bar-to-bar structural pivots)
-    which is the standard Weis methodology, plus Wyckoff volume_strength.
-
-    If lib_df is provided (from Block 2's _segment_waves_nolag), the library
-    analysis is reused — no double computation.
-
-    11 features (indices 61-71):
-      61: lib_volume_strength      — categorical vol strength [0,1] (0-4 / 4)
-      62: lib_wave_vs_same_dir     — binary +1/-1 wave comparison (same-dir)
-      63: lib_er_vs_same_dir       — binary +1/-1 effort/result comparison
-      64: lib_wave_vs_prev         — binary +1/-1 wave vs immediately previous
-      65: lib_er_vs_prev           — binary +1/-1 E/R vs immediately previous
-      66: lib_large_wave           — large cumulative wave flag (yellow bar)
-      67: lib_large_er             — large effort/result flag (yellow bar)
-      68: lib_pivot_flag           — 1.0 at zigzag pivot, 0.0 elsewhere
-      69: lib_exhaust_up           — consecutive diminishing up-wave count / 5
-      70: lib_exhaust_down         — consecutive diminishing down-wave count / 5
-      71: lib_in_range             — trading range flag (last 6 pivots in <2% band)
-    """
-    if not _HAS_WW_LIB:
-        raise ImportError("srl-python-indicators library not available for Block 6")
-
-    n = len(df)
-
-    # Reuse library result from Block 2 if available, otherwise run fresh
-    if lib_df is None:
-        lib_df = df[['open', 'high', 'low', 'close', 'volume']].copy()
-        if 'datetime' not in lib_df.columns:
-            lib_df['datetime'] = lib_df.index
-        wws = _LibWWS()
-        zz = _LibZigZagInit(_LibZigZagMode.NoLag_HighLow)
-        lib_df = wws.full_analysis(lib_df, None, None, zigzag_init=zz)
-        logger.info("Block 6: ran fresh library analysis")
-    else:
-        logger.info("Block 6: reusing library result from Block 2")
-
-    # ── Direct library features ──
-    vol_strength = lib_df['volume_strength'].fillna(0).values / 4.0
-    wave_vs_same = lib_df['wave_vs_same_direction'].fillna(0).values.astype(np.float32)
-    er_vs_same = lib_df['effort_result_vs_same_direction'].fillna(0).values.astype(np.float32)
-    wave_vs_prev = lib_df['wave_vs_previous'].fillna(0).values.astype(np.float32)
-    er_vs_prev = lib_df['effort_result_vs_previous'].fillna(0).values.astype(np.float32)
-    large_wave = lib_df['large_wave'].fillna(0).values.astype(np.float32)
-    large_er = lib_df['large_effort_result'].fillna(0).values.astype(np.float32)
-    pivot_flag = lib_df['end_wave'].notna().astype(np.float32).values
-
-    # ── Multi-wave exhaustion + trading range ──
-    exhaust_up = np.zeros(n, dtype=np.float32)
-    exhaust_down = np.zeros(n, dtype=np.float32)
-    in_range = np.zeros(n, dtype=np.float32)
-
-    pivot_locs = np.where(lib_df['end_wave'].notna())[0]
-
-    if len(pivot_locs) >= 2:
-        pivot_prices = lib_df['end_wave'].values[pivot_locs].astype(np.float64)
-        pivot_vols = lib_df['wave_volume'].values[pivot_locs].astype(np.float64)
-
-        up_hist, dn_hist = [], []
-        for w in range(len(pivot_locs)):
-            idx = pivot_locs[w]
-            vol = pivot_vols[w]
-            d = 0 if w == 0 else (1 if pivot_prices[w] > pivot_prices[w - 1] else -1)
-
-            if d == 1:
-                up_hist.append(vol)
-                consec = 0
-                for k in range(len(up_hist) - 1, 0, -1):
-                    if up_hist[k] < up_hist[k - 1]:
-                        consec += 1
-                    else:
-                        break
-                exhaust_up[idx] = min(consec / 5.0, 1.0)
-            elif d == -1:
-                dn_hist.append(vol)
-                consec = 0
-                for k in range(len(dn_hist) - 1, 0, -1):
-                    if dn_hist[k] < dn_hist[k - 1]:
-                        consec += 1
-                    else:
-                        break
-                exhaust_down[idx] = min(consec / 5.0, 1.0)
-
-            # Trading range: last 20 NoLag pivots (~40 bars) in narrow band
-            # (NoLag_HighLow produces dense pivots, need wider lookback for
-            #  meaningful accumulation/distribution range detection)
-            if w >= 19:
-                recent = pivot_prices[w - 19:w + 1]
-                hi, lo = recent.max(), recent.min()
-                mid = (hi + lo) / 2
-                if mid > 0 and (hi - lo) / mid < 0.015:
-                    in_range[idx] = 1.0
-
-        # Forward-fill exhaustion/range between pivots
-        for w in range(len(pivot_locs) - 1):
-            s, e = pivot_locs[w], pivot_locs[w + 1]
-            exhaust_up[s + 1:e] = exhaust_up[s]
-            exhaust_down[s + 1:e] = exhaust_down[s]
-            in_range[s + 1:e] = in_range[s]
-        last = pivot_locs[-1]
-        exhaust_up[last + 1:] = exhaust_up[last]
-        exhaust_down[last + 1:] = exhaust_down[last]
-        in_range[last + 1:] = in_range[last]
-
-    result = pd.DataFrame({
-        "lib_volume_strength": vol_strength,
-        "lib_wave_vs_same_dir": wave_vs_same,
-        "lib_er_vs_same_dir": er_vs_same,
-        "lib_wave_vs_prev": wave_vs_prev,
-        "lib_er_vs_prev": er_vs_prev,
-        "lib_large_wave": large_wave,
-        "lib_large_er": large_er,
-        "lib_pivot_flag": pivot_flag,
-        "lib_exhaust_up": exhaust_up,
-        "lib_exhaust_down": exhaust_down,
-        "lib_in_range": in_range,
-    }, index=df.index)
-
-    logger.info(f"Block 6 (Library Weis): {result.shape[1]} features computed "
-                f"({len(pivot_locs)} pivots detected by NoLag_HighLow)")
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Master Feature Builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_all_features(
     df: pd.DataFrame,
-    reversal_points: float = 120.0,
+    reversal_points: float = 40.0,
     swing_lookback: int = 20,
     phase_lookback: int = 50,
 ) -> Tuple[np.ndarray, List[str], pd.DataFrame]:
@@ -1289,7 +1011,7 @@ def build_all_features(
     df : pd.DataFrame
         OHLCV + delta + duration data from range bars.
     reversal_points : float
-        ZigZag reversal in price points (120 = 3x bar size for NQ 40pt).
+        ZigZag reversal in price points (40 for NQ 40pt range bars).
     swing_lookback : int
         Bars for swing high/low computation.
     phase_lookback : int
@@ -1323,26 +1045,17 @@ def build_all_features(
         "wave_velocity_norm": b2.attrs["_wave_velocity_norm"],
     }, index=df.index)
 
-    # Block 6: Library Weis Wave features (NoLag_HighLow zigzag)
-    # Reuse the library DataFrame from Block 2 if available (avoids double computation)
-    if _HAS_WW_LIB:
-        b2_lib_df = b2.attrs.get("_lib_df", None)
-        b6 = compute_block6_library_weis(df, lib_df=b2_lib_df)
-        features_df = pd.concat([b1, b2, b3, b4, b5, b6], axis=1)
-    else:
-        logger.warning("srl-python-indicators not found — skipping Block 6")
-        features_df = pd.concat([b1, b2, b3, b4, b5], axis=1)
-
+    # Concatenate all blocks
+    features_df = pd.concat([b1, b2, b3, b4, b5], axis=1)
     feature_names = features_df.columns.tolist()
 
     # Convert to numpy, clean NaN/inf
     tech_ary = features_df.values.astype(np.float32)
     tech_ary = np.nan_to_num(tech_ary, nan=0.0, posinf=0.0, neginf=0.0)
 
-    b6_str = f", B6={b6.shape[1]}" if _HAS_WW_LIB else ""
     logger.info(
-        f"Total features: {len(feature_names)} across {'6' if _HAS_WW_LIB else '5'} blocks "
-        f"(B1={b1.shape[1]}, B2={b2.shape[1]}, B3={b3.shape[1]}, B4={b4.shape[1]}, B5={b5.shape[1]}{b6_str})")
+        f"Total features: {len(feature_names)} across 5 blocks "
+        f"(B1={b1.shape[1]}, B2={b2.shape[1]}, B3={b3.shape[1]}, B4={b4.shape[1]}, B5={b5.shape[1]})")
     return tech_ary, feature_names, features_df
 
 
@@ -1521,7 +1234,7 @@ def run_feature_pipeline(
     bar_size : float
         Range bar size in points. Defaults to config.RANGE_BAR_SIZE (40.0).
     reversal_points : float
-        ZigZag reversal for Weis Wave. Defaults to config.REVERSAL_POINTS (120.0).
+        ZigZag reversal for Weis Wave. Defaults to config.REVERSAL_POINTS (200.0).
     output_dir : str
         Output directory. Defaults to config.OUTPUT_DIR.
     run_importance : bool
@@ -1661,151 +1374,24 @@ def run_feature_pipeline(
 
 if __name__ == "__main__":
     import argparse
-    import sys
 
-    def _cmd_build(args):
-        """SCID → range bars → features → NPZ."""
-        result = run_feature_pipeline(
-            scid_path=args.scid,
-            bar_size=args.bar_size,
-            reversal_points=args.reversal,
-            output_dir=args.output_dir,
-            run_importance=not args.no_importance,
-        )
-        print(f"\nPipeline complete:")
-        print(f"  Bars:     {result['n_bars']:,}")
-        print(f"  Features: {result['n_features']}")
-        print(f"  NPZ:      {result['npz_path']}")
-        print(f"  Parquet:  {result['parquet_path']}")
-
-    def _cmd_verify(args):
-        """Inspect an existing NPZ: shape, feature stats, phase score diagnostics."""
-        npz = np.load(args.npz, allow_pickle=True)
-        tech = npz["tech_ary"]
-        close = npz["close_ary"]
-        names = list(npz["feature_names"])
-        n_bars, n_feat = tech.shape
-
-        print(f"\n{'='*60}")
-        print(f"NPZ: {args.npz}")
-        print(f"{'='*60}")
-        print(f"  Bars:      {n_bars:,}")
-        print(f"  Features:  {n_feat}")
-        print(f"  Close:     {close.shape}")
-        print(f"  dtype:     {tech.dtype}")
-
-        # NaN / Inf
-        nan_count = np.isnan(tech).sum()
-        inf_count = np.isinf(tech).sum()
-        print(f"  NaN cells: {nan_count}")
-        print(f"  Inf cells: {inf_count}")
-
-        # Phase score diagnostics
-        phase_idx = [i for i, n in enumerate(names) if "phase_" in n and "score" in n]
-        if phase_idx:
-            phase_vals = tech[:, phase_idx]
-            phase_sum = phase_vals.sum(axis=1)
-            phase_names = [names[i] for i in phase_idx]
-            print(f"\n  Phase scores ({phase_names}):")
-            print(f"    sum  min={phase_sum.min():.4f}  max={phase_sum.max():.4f}  mean={phase_sum.mean():.4f}")
-            normalized = np.allclose(phase_sum, 1.0, atol=0.01)
-            print(f"    normalized (sum≈1): {'YES ✓' if normalized else 'NO ✗  — run normalize-phases to fix'}")
-        else:
-            print("\n  (no phase score columns found)")
-
-        # Per-feature summary
-        if args.stats:
-            print(f"\n  {'Feature':<30s} {'mean':>9s} {'std':>9s} {'min':>9s} {'max':>9s} {'zero%':>7s}")
-            print(f"  {'-'*30} {'-'*9} {'-'*9} {'-'*9} {'-'*9} {'-'*7}")
-            for i, name in enumerate(names):
-                col = tech[:, i]
-                z_pct = (col == 0).sum() / n_bars * 100
-                print(f"  {name:<30s} {col.mean():9.4f} {col.std():9.4f} "
-                      f"{col.min():9.4f} {col.max():9.4f} {z_pct:6.1f}%")
-
-    def _cmd_normalize_phases(args):
-        """Patch phase scores in an existing NPZ so they sum to 1.0."""
-        import os
-        npz_data = np.load(args.npz, allow_pickle=True)
-        tech = npz_data["tech_ary"].copy()
-        names = list(npz_data["feature_names"])
-
-        phase_idx = [i for i, n in enumerate(names) if "phase_" in n and "score" in n]
-        if not phase_idx:
-            print("ERROR: No phase score columns found in NPZ.")
-            sys.exit(1)
-
-        phase_vals = tech[:, phase_idx]
-        phase_sum_before = phase_vals.sum(axis=1)
-        print(f"Before: phase sum  min={phase_sum_before.min():.4f}  "
-              f"max={phase_sum_before.max():.4f}  mean={phase_sum_before.mean():.4f}")
-
-        if np.allclose(phase_sum_before, 1.0, atol=0.01):
-            print("Phase scores already normalized — nothing to do.")
-            return
-
-        # Normalize
-        eps = 1e-8
-        row_sum = phase_vals.sum(axis=1, keepdims=True) + eps
-        tech[:, phase_idx] = phase_vals / row_sum
-
-        phase_sum_after = tech[:, phase_idx].sum(axis=1)
-        print(f"After:  phase sum  min={phase_sum_after.min():.4f}  "
-              f"max={phase_sum_after.max():.4f}  mean={phase_sum_after.mean():.4f}")
-
-        if args.dry_run:
-            print("(dry-run — NPZ not modified)")
-            return
-
-        # Save — preserve all original arrays
-        save_kwargs = {k: npz_data[k] for k in npz_data.files}
-        save_kwargs["tech_ary"] = tech
-        np.savez_compressed(args.npz, **save_kwargs)
-        size_mb = os.path.getsize(args.npz) / 1024 / 1024
-        print(f"Saved: {args.npz} ({size_mb:.1f} MB)")
-
-    # ── CLI ───────────────────────────────────────────────────────────────
-    parser = argparse.ArgumentParser(
-        description="Wyckoff-Weis Wave Feature Pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-examples:
-  # Full rebuild from SCID
-  python -m wyckoff_effort.pipeline.wyckoff_features build --reversal 80
-
-  # Inspect existing NPZ
-  python -m wyckoff_effort.pipeline.wyckoff_features verify wyckoff_effort/pipeline_output/wyckoff_nq_40pt.npz
-
-  # Patch phase scores in-place
-  python -m wyckoff_effort.pipeline.wyckoff_features normalize-phases wyckoff_effort/pipeline_output/wyckoff_nq_40pt.npz
-""",
-    )
-    sub = parser.add_subparsers(dest="command")
-
-    # ── build ──
-    p_build = sub.add_parser("build", help="SCID → range bars → features → NPZ")
-    p_build.add_argument("--scid", type=str, default=None, help="Path to SCID file")
-    p_build.add_argument("--bar-size", type=float, default=None, help="Range bar size in points")
-    p_build.add_argument("--reversal", type=float, default=None, help="ZigZag reversal points")
-    p_build.add_argument("--output-dir", type=str, default=None, help="Output directory")
-    p_build.add_argument("--no-importance", action="store_true", help="Skip importance evaluation")
-
-    # ── verify ──
-    p_verify = sub.add_parser("verify", help="Inspect NPZ: shape, stats, phase score check")
-    p_verify.add_argument("npz", type=str, help="Path to NPZ file")
-    p_verify.add_argument("--stats", action="store_true", help="Print per-feature statistics")
-
-    # ── normalize-phases ──
-    p_norm = sub.add_parser("normalize-phases", help="Normalize phase scores in existing NPZ")
-    p_norm.add_argument("npz", type=str, help="Path to NPZ file")
-    p_norm.add_argument("--dry-run", action="store_true", help="Show what would change without saving")
-
+    parser = argparse.ArgumentParser(description="Wyckoff-Weis Wave Feature Pipeline")
+    parser.add_argument("--scid", type=str, default=None, help="Path to SCID file")
+    parser.add_argument("--bar-size", type=float, default=None, help="Range bar size in points")
+    parser.add_argument("--reversal", type=float, default=None, help="ZigZag reversal points")
+    parser.add_argument("--output-dir", type=str, default=None, help="Output directory")
+    parser.add_argument("--no-importance", action="store_true", help="Skip importance evaluation")
     args = parser.parse_args()
-    if args.command == "build":
-        _cmd_build(args)
-    elif args.command == "verify":
-        _cmd_verify(args)
-    elif args.command == "normalize-phases":
-        _cmd_normalize_phases(args)
-    else:
-        parser.print_help()
+
+    result = run_feature_pipeline(
+        scid_path=args.scid,
+        bar_size=args.bar_size,
+        reversal_points=args.reversal,
+        output_dir=args.output_dir,
+        run_importance=not args.no_importance,
+    )
+    print(f"\nPipeline complete:")
+    print(f"  Bars:     {result['n_bars']:,}")
+    print(f"  Features: {result['n_features']}")
+    print(f"  NPZ:      {result['npz_path']}")
+    print(f"  Parquet:  {result['parquet_path']}")

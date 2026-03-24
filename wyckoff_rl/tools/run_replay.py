@@ -177,6 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Named veto preset from VETO_PRESETS (or "auto")')
     p.add_argument('--compare-veto', action='store_true',
                    help='Run each checkpoint twice: without and with veto')
+    p.add_argument('--reversal-mult', type=float, default=3.0,
+                   help='ZigZag reversal multiplier (1.0=40pt for old models, 3.0=120pt default)')
+    p.add_argument('--legacy', action='store_true',
+                   help='Use pre-audit feature formulas (for models trained before 2026-03-23)')
     p.add_argument('--export-logs', action='store_true',
                    help='Write per-trade CSV logs (same format as old WyckoffTrader)')
     p.add_argument('--log-dir', default='wyckoff_rl/live_logs/replay')
@@ -230,9 +234,12 @@ def main():
 
     # Precompute bars + features ONCE (the expensive part)
     from wyckoff_rl.live.precompute import PrecomputedReplay
-    print(f"\nPrecomputing bars + features...", flush=True)
+    legacy_str = " [LEGACY formulas]" if args.legacy else ""
+    print(f"\nPrecomputing bars + features (reversal_mult={args.reversal_mult}){legacy_str}...", flush=True)
     replay = PrecomputedReplay.from_scid(
         args.scid, args.start_date, args.end_date,
+        reversal_mult=args.reversal_mult,
+        legacy=args.legacy,
     )
     print(f"  → {replay.n_bars} bars, {replay.n_windows} windows\n", flush=True)
 

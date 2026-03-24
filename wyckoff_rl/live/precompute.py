@@ -37,7 +37,11 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from wyckoff_rl.live.range_bar_builder import RangeBarBuilder
-from wyckoff_rl.live.live_features import TRAINING_FEATURE_INDICES, N_TRAINING_FEATURES
+from wyckoff_rl.live.live_features import (
+    TRAINING_FEATURE_INDICES,
+    LEGACY_TRAINING_INDICES,
+    N_TRAINING_FEATURES,
+)
 from wyckoff_rl.live.inference import InferenceEngine
 from wyckoff_rl.feature_config import ALL_FEATURES
 
@@ -74,12 +78,14 @@ class PrecomputedReplay:
         prices: np.ndarray,
         timestamps: np.ndarray,
         window_offset: int,
+        feature_indices: list[int] | None = None,
     ):
-        self.features = features        # (n_bars, 36)
-        self.windows = windows           # (n_windows, 30, 36)
+        self.features = features        # (n_bars, n_feat)
+        self.windows = windows           # (n_windows, 30, n_feat)
         self.prices = prices             # (n_bars,)
         self.timestamps = timestamps     # (n_bars,)
         self.window_offset = window_offset  # first bar index with a full window
+        self.feature_indices = feature_indices or list(TRAINING_FEATURE_INDICES)
         self.n_bars = len(prices)
         self.n_windows = len(windows)
 
@@ -94,6 +100,7 @@ class PrecomputedReplay:
         window_size: int = 30,
         feature_buffer: int = 200,
         feature_indices: Optional[list[int]] = None,
+        legacy: bool = False,
     ) -> "PrecomputedReplay":
         """
         Parse SCID file → build range bars → compute all features → build windows.
@@ -111,13 +118,19 @@ class PrecomputedReplay:
         feature_buffer : int
             Bars of context for feature computation warmup (200).
         feature_indices : list[int]
-            Which of 58 features to select (default: TRAINING_FEATURE_INDICES).
+            Which of 72 features to select (default: TRAINING_FEATURE_INDICES
+            or LEGACY_TRAINING_INDICES when legacy=True).
 
         Returns
         -------
         PrecomputedReplay
         """
-        feat_idx = feature_indices or TRAINING_FEATURE_INDICES
+        if feature_indices is not None:
+            feat_idx = feature_indices
+        elif legacy:
+            feat_idx = LEGACY_TRAINING_INDICES
+        else:
+            feat_idx = TRAINING_FEATURE_INDICES
         t0 = time.time()
 
         # Step 1: Parse SCID exactly like adapters.SCIDReplayAdapter.start()
@@ -186,7 +199,9 @@ class PrecomputedReplay:
         } for b in bars])
 
         from wyckoff_effort.pipeline.wyckoff_features import build_all_features
-        tech_ary, _, _ = build_all_features(bar_df, reversal_points=range_size * reversal_mult)
+        from wyckoff_effort.pipeline.wyckoff_features_legacy import build_all_features as build_all_features_legacy
+        _build = build_all_features_legacy if legacy else build_all_features
+        tech_ary, _, _ = _build(bar_df, reversal_points=range_size * reversal_mult)
         features = tech_ary[:, feat_idx].astype(np.float32)  # (n_bars, 36)
         t2 = time.time()
         logger.info(f"  Computed {features.shape} features in {t2-t1:.1f}s")
@@ -211,7 +226,8 @@ class PrecomputedReplay:
         logger.info(f"  Built {windows.shape} windows in {t3-t2:.1f}s")
         logger.info(f"Total precompute: {t3-t0:.1f}s")
 
-        return cls(features, windows, prices, timestamps, window_offset)
+        return cls(features, windows, prices, timestamps, window_offset,
+                   feature_indices=list(feat_idx))
 
     # ─────────────────────────────────────────────────────────────────
     # Checkpoint replay (fast — inference only)
@@ -240,7 +256,7 @@ class PrecomputedReplay:
         Returns dict with: label, bars, trades, round_trips, vetoed,
         total_pnl_usd, pnl_pts, cumR, win_rate, max_dd_usd, equity, elapsed_s
         """
-        from wyckoff_rl.live.trader import VetoFilter
+        from wyckoff_rl.live.trader import VetoFilter, _build_feature_name_map
 
         t0 = time.time()
 
@@ -249,7 +265,11 @@ class PrecomputedReplay:
         actor.eval()
 
         initial_amount = 1000.0
-        vf = VetoFilter(veto_rules) if veto_rules else None
+        if veto_rules:
+            feat_map = _build_feature_name_map(self.feature_indices)
+            vf = VetoFilter(veto_rules, feat_map)
+        else:
+            vf = None
 
         # State
         position = 0.0

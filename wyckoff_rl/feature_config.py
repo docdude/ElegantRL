@@ -14,10 +14,9 @@ replacing hand-crafted temporal compressions (decay timers, phase scores)
 with learned temporal pattern recognition.
 """
 
-# All 61 features in the NPZ, in order.
-# The first 58 match the original schema; 3 wave temporal features
-# (effort_result_raw, time_norm, velocity_norm) are appended at the end
-# to preserve index compatibility with models trained on the 58-feature layout.
+# All 72 features in the tech_ary, in order.
+# Blocks 1-5 (indices 0-60): original schema.
+# Block 6 (indices 61-71): library Weis Wave features (NoLag_HighLow zigzag).
 ALL_FEATURES = [
     'body_ratio', 'upper_wick_ratio', 'lower_wick_ratio', 'close_location', 'delta_ratio',
     'vol_vs_ma20', 'vol_vs_ma50', 'er_ratio', 'duration_norm', 'cvd_slope_fast',
@@ -32,6 +31,10 @@ ALL_FEATURES = [
     'bars_in_range', 'support_test_count', 'resistance_test_count', 'phase_accum_score', 'phase_markup_score',
     'phase_distrib_score', 'phase_markdown_score', 'trend_4x',
     'wave_effort_result_raw', 'wave_time_norm', 'wave_velocity_norm',
+    # Block 6: Library Weis Wave (NoLag_HighLow structural zigzag)
+    'lib_volume_strength', 'lib_wave_vs_same_dir', 'lib_er_vs_same_dir',
+    'lib_wave_vs_prev', 'lib_er_vs_prev', 'lib_large_wave', 'lib_large_er',
+    'lib_pivot_flag', 'lib_exhaust_up', 'lib_exhaust_down', 'lib_in_range',
 ]
 
 # ─── Features to DROP ───────────────────────────────────────────────────────

@@ -98,15 +98,27 @@ ENV_FEATURE_INDICES = [
     54,  # phase_markup_score   — markup probability
     55,  # phase_distrib_score  — distribution probability
     56,  # phase_markdown_score — markdown probability
+    # ── Block 6: Library Weis Wave (NoLag_HighLow zigzag) (11) ──
+    61,  # lib_volume_strength   — categorical vol strength [0,1]
+    62,  # lib_wave_vs_same_dir  — binary wave comparison (same-dir)
+    63,  # lib_er_vs_same_dir    — binary E/R comparison (same-dir)
+    64,  # lib_wave_vs_prev      — binary wave vs immediately previous
+    65,  # lib_er_vs_prev        — binary E/R vs immediately previous
+    66,  # lib_large_wave        — large cumulative wave (yellow bar)
+    67,  # lib_large_er          — large effort/result (yellow bar)
+    68,  # lib_pivot_flag        — 1.0 at structural pivot
+    69,  # lib_exhaust_up        — consecutive diminishing up-waves
+    70,  # lib_exhaust_down      — consecutive diminishing down-waves
+    71,  # lib_in_range          — trading range flag
 ]
 
-N_ENV_FEATURES = len(ENV_FEATURE_INDICES)   # 38
+N_ENV_FEATURES = len(ENV_FEATURE_INDICES)   # 49
 N_POSITION_FEATURES = 8                     # side, size, entry_dist, ...
 
 # Map from tech_ary column index → offset inside selected feature vector
 _EFI_LOOKUP = {col: i for i, col in enumerate(ENV_FEATURE_INDICES)}
 
-# Event column offsets (inside the 38-feature selected vector)
+# Event column offsets (inside the 49-feature selected vector)
 COL_SPRING = _EFI_LOOKUP[35]
 COL_UPTHRUST = _EFI_LOOKUP[36]
 COL_SC = _EFI_LOOKUP[37]
@@ -148,8 +160,8 @@ class NQWyckoffWeisEnv:
     """
     Single-instance Wyckoff/Weis NQ futures trading environment.
 
-    Observation (state_dim = 46):
-      [38 selected features from tech_ary | 8 position-state features]
+    Observation (state_dim = 57):
+      [49 selected features from tech_ary | 8 position-state features]
 
     Action (discrete, 6):
       hold | enter_long | enter_short | add | reduce | exit
@@ -618,8 +630,8 @@ class NQWyckoffWeisVecEnv:
     All state is PyTorch tensors on GPU, num_envs episodes run in parallel
     with per-env bar tracking and auto-reset.
 
-    Observation  (state_dim = 46):
-      [38 selected features | 8 position features]
+    Observation  (state_dim = 57):
+      [49 selected features | 8 position features]
 
     Action (discrete, 6):
       hold | enter_long | enter_short | add | reduce | exit
@@ -732,7 +744,7 @@ class NQWyckoffWeisVecEnv:
         self.env_name = "NQWyckoffWeisVecEnv-v1"
         self.num_envs = num_envs
         self.max_step = self.close_price.shape[0] - 1
-        self.state_dim = n_selected + N_POSITION_FEATURES   # 38 + 8 = 46
+        self.state_dim = n_selected + N_POSITION_FEATURES   # 49 + 8 = 57
         self.action_dim = N_ACTIONS                          # 6
         self.if_discrete = True
         self.target_return = +np.inf
