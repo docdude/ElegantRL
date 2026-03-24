@@ -209,7 +209,7 @@ def evaluate_single_checkpoint(
             end_idx=test_len,
             max_step=test_len,
             commission=env_params.get('commission', 1.50),
-            feature_indices=env_params.get('feature_indices', _ENV_FEATURE_INDICES),
+            feature_indices=_ENV_FEATURE_INDICES,
             random_start=False,
         )
     else:
