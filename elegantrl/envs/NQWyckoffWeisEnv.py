@@ -822,8 +822,18 @@ class NQWyckoffWeisVecEnv:
         self._mark_to_market()
 
         # 6) Reward — dense: position_exposure × price_change
+        #    For entry bars, use fill price (not bar close) as baseline
+        #    to avoid phantom edge from ignoring slippage in the reward.
         curr_price = self.close_price[self.day]
-        price_change = curr_price - prev_price
+        just_entered = (action == ACTION_ENTER_LONG) | (action == ACTION_ENTER_SHORT)
+        was_flat = (prev_price == self.entry_price)  # stale check
+        # Entry bar baseline = entry_price (includes slippage), else prev bar close
+        baseline = th.where(
+            just_entered & (self.pos_side.abs() > 0),
+            self.entry_price,
+            prev_price,
+        )
+        price_change = curr_price - baseline
         ticks = (price_change / self.tick_size) * post_side
         holding_pnl = ticks * self.tick_value * post_size
         pnl_delta = holding_pnl / self.pnl_norm

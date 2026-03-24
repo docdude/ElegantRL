@@ -67,8 +67,8 @@ def save_sliced_data(
 def get_agent_class(model_name: str):
     model_name = model_name.lower()
     if model_name == "discrete_ppo":
-        from elegantrl.agents.AgentPPO import AgentDiscretePPO
-        return AgentDiscretePPO
+        from wyckoff_rl.agents import AgentDiscreteWyckoffPPO
+        return AgentDiscreteWyckoffPPO
     elif model_name == "ppo":
         from elegantrl.agents.AgentPPO import AgentPPO
         return AgentPPO
@@ -256,12 +256,13 @@ def train_split(
             'max_position_size': env_params.get('max_position_size', 2),
             'reward_scale': env_params.get('reward_scale', 1.0),
             'event_threshold': 0.3,
-            'entry_bonus_scale': 0.25,
+            'entry_bonus_scale': 0.02,
             'invalid_penalty': 0.02,
-            'mgmt_bonus_scale': 0.02,
-            'mgmt_penalty_scale': 0.03,
+            'mgmt_bonus_scale': 0.002,
+            'mgmt_penalty_scale': 0.005,
             'overstay_bars': 20,
-            'regime_penalty_scale': 0.05,
+            'regime_penalty_scale': 0.01,
+            'idle_penalty': 0.005,
             'gamma': erl_params.get('gamma', 0.99),
             'reward_mode': env_params.get('reward_mode', 'pnl'),
             'log_dir': cwd,
@@ -352,7 +353,7 @@ def train_split(
     args.if_keep_save = True
     args.if_over_write = False
     args.num_workers = _num_workers
-    args.state_value_tau = 0  # no internal norm
+    args.state_value_tau = 0.005  # enable running state normalization
 
     # ── 3. Save metadata ─────────────────────────────────────────────────
     meta = {

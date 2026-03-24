@@ -737,8 +737,15 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     spring_delta = np.clip(delta_ratio, 0, 1)  # positive delta = buying
     # Wave exhaustion: previous down-waves declining in vol (< 1 = exhaustion)
     wave_exhaust_down = np.clip(1.0 - np.minimum(wave_vol_same, 1.0), 0, 1)
+    # Wave exhaustion for up-waves (needed for upthrust)
+    wave_exhaust_up = np.clip(1.0 - np.minimum(wave_vol_same, 1.0), 0, 1)
+    # Override: for up-wave bars use up-wave exhaustion from separate tracker
+    # wave_vol_same tracks same-direction, so up-bar exhaustion is already captured
     spring_score = np.clip(
-        spring_penetration * spring_recovery * (0.5 + 0.5 * spring_delta), 0, 1
+        spring_penetration * spring_recovery
+        * (0.5 + 0.5 * spring_delta)
+        * (0.3 + 0.7 * wave_exhaust_down),  # wave exhaustion required
+        0, 1
     )
 
     # UPTHRUST: high > swing_high_prev, close rejects, delta negative
@@ -749,7 +756,10 @@ def compute_block3_events(df: pd.DataFrame, b2: pd.DataFrame,
     ut_rejection = 1.0 - ut_rejection  # invert: close near low = strong rejection
     ut_delta = np.clip(-delta_ratio, 0, 1)  # negative delta = selling
     upthrust_score = np.clip(
-        ut_penetration * ut_rejection * (0.5 + 0.5 * ut_delta), 0, 1
+        ut_penetration * ut_rejection
+        * (0.5 + 0.5 * ut_delta)
+        * (0.3 + 0.7 * wave_exhaust_up),  # wave exhaustion required
+        0, 1
     )
 
     # SELLING CLIMAX: vol spike + close near low + delta positive (absorption)
