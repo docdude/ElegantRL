@@ -294,8 +294,9 @@ class NQWyckoffWeisEnv:
     def step(self, action: int):
         action = int(action)
 
-        # Snapshot pre-action price for dense reward
+        # Snapshot pre-action state for reward gating
         prev_price = float(self.close_ary[self._t])
+        prev_side = self._side  # needed to gate entry bonus
 
         # 1) Execute action at current bar close
         penalty = self._execute(action)
@@ -326,6 +327,11 @@ class NQWyckoffWeisEnv:
         # On entry with valid signal, store the bonus; pay it only after
         # the agent has held for vesting_bars (forfeit if exiting early)
         raw_entry_bonus = self._entry_bonus(action)
+        # Gate: only award bonus when actually entering (not already positioned same direction)
+        if action == ACTION_ENTER_LONG and prev_side == 1:
+            raw_entry_bonus = 0.0  # already long, no bonus
+        elif action == ACTION_ENTER_SHORT and prev_side == -1:
+            raw_entry_bonus = 0.0  # already short, no bonus
         if raw_entry_bonus > 0 and self.vesting_bars > 0:
             self._vesting_drip = raw_entry_bonus  # deferred amount
             self._vesting_remaining = self.vesting_bars
@@ -339,8 +345,8 @@ class NQWyckoffWeisEnv:
         mgmt_bonus = self._management_bonus(action)
         regime_penalty = self._regime_mismatch_penalty(action)
 
-        # Carry cost: per-bar cost of being positioned (encourages selectivity)
-        carry = self.carry_cost if (post_side != 0 and post_size > 0) else 0.0
+        # Carry cost: per-bar cost scaled by position size (1 lot = 1×, 2 lots = 2×)
+        carry = self.carry_cost * post_size
 
         reward = (pnl_delta + vesting_bonus + mgmt_bonus
                   - penalty - regime_penalty - carry) * self.reward_scale
@@ -890,8 +896,9 @@ class NQWyckoffWeisVecEnv:
             action = action[:, 0]
         action = action.long()
 
-        # 1) Snapshot pre-action price for dense reward
+        # 1) Snapshot pre-action state for reward gating
         prev_price = self.close_price[self.day]
+        prev_side = self.pos_side.clone()  # needed to gate entry bonus
 
         # 2) Execute discrete actions
         penalty = self._execute_actions(action)
@@ -931,6 +938,12 @@ class NQWyckoffWeisVecEnv:
         # On entry with valid signal, store the bonus; pay it only after
         # the agent has held for vesting_bars (forfeit if exiting early)
         raw_entry_bonus = self._compute_entry_bonus(action)
+        # Gate: only award bonus when actually entering (not already positioned same direction)
+        actually_entered = (
+            ((action == ACTION_ENTER_LONG) & (prev_side != 1))
+            | ((action == ACTION_ENTER_SHORT) & (prev_side != -1))
+        )
+        raw_entry_bonus = th.where(actually_entered, raw_entry_bonus, th.zeros_like(raw_entry_bonus))
         has_new_bonus = raw_entry_bonus > 0
         if has_new_bonus.any():
             self.vesting_amount = th.where(has_new_bonus, raw_entry_bonus, self.vesting_amount)
@@ -952,11 +965,8 @@ class NQWyckoffWeisVecEnv:
         mgmt_bonus = self._compute_management_bonus(action)
         regime_penalty = self._compute_regime_mismatch_penalty(action)
 
-        # Carry cost: per-bar cost of being positioned (encourages selectivity)
-        is_positioned = (post_side.abs() > 0) & (post_size > 0)
-        carry = th.where(is_positioned,
-                         th.tensor(self.carry_cost, device=self.device),
-                         th.tensor(0.0, device=self.device))
+        # Carry cost: per-bar cost scaled by position size (1 lot = 1×, 2 lots = 2×)
+        carry = self.carry_cost * post_size
 
         reward = (pnl_delta + entry_bonus + mgmt_bonus
                   - penalty - regime_penalty - carry) * self.reward_scale
