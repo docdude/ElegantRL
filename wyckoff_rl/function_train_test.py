@@ -264,6 +264,7 @@ def train_split(
             'regime_penalty_scale': 0.05,
             'gamma': erl_params.get('gamma', 0.99),
             'reward_mode': env_params.get('reward_mode', 'pnl'),
+            'log_dir': cwd,
         }
 
         eval_env_args = env_args.copy()

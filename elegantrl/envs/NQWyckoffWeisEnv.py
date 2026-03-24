@@ -607,6 +607,7 @@ class NQWyckoffWeisVecEnv:
         feature_indices: list[int] | None = None,
         gamma: float = 0.99,            # kept for ElegantRL Config compat
         reward_mode: str = "pnl",       # kept for Config compat
+        log_dir: str = "",
         **kwargs,
     ):
         self.device = th.device(
@@ -697,6 +698,30 @@ class NQWyckoffWeisVecEnv:
         self._diag_penalty = 0.0
         self._diag_regime = 0.0
         self._diag_steps = 0
+        self._diag_action_counts = th.zeros(N_ACTIONS, dtype=th.long, device=self.device)
+        self._diag_episodes_done = 0
+        self._diag_episode_pnl_sum = 0.0
+        self._diag_episode_pnl_sq = 0.0
+        self._diag_episode_trades_sum = 0
+
+        # ── File logger ──────────────────────────────────────────────────
+        self._flog = None
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+            _pid = os.getpid()
+            _logpath = os.path.join(log_dir, f"env_diag_pid{_pid}.log")
+            self._flog = open(_logpath, "a", buffering=1)  # line-buffered
+            self._flog.write(
+                f"# NQWyckoffWeisVecEnv diag | pid={_pid} num_envs={num_envs} "
+                f"episode_len={episode_len} bars={len(close_ary)} "
+                f"entry_bonus={entry_bonus_scale} pnl_norm={pnl_norm}\n"
+            )
+            self._flog.write(
+                "step,|pnl|,|entry|,|mgmt|,|pen|,|regime|,"
+                "H%,EL%,ES%,A%,R%,X%,"
+                "ep_done,ep_pnl_mean,ep_pnl_std,ep_trades_mean,"
+                "pos_pct,long_pct,short_pct,avg_unreal\n"
+            )
 
     # ─── Reset ────────────────────────────────────────────────────────────
 
@@ -819,16 +844,11 @@ class NQWyckoffWeisVecEnv:
         self._diag_penalty += penalty.abs().mean().item()
         self._diag_regime += regime_penalty.abs().mean().item()
         self._diag_steps += 1
+        # Action distribution tracking
+        for a in range(N_ACTIONS):
+            self._diag_action_counts[a] += (action == a).sum()
         if self._diag_steps % 5000 == 0:
-            n = self._diag_steps
-            logger.info(
-                f"[RewardDiag] steps={n} "
-                f"|pnl|={self._diag_pnl/n:.4f} "
-                f"|entry|={self._diag_entry/n:.4f} "
-                f"|mgmt|={self._diag_mgmt/n:.4f} "
-                f"|pen|={self._diag_penalty/n:.4f} "
-                f"|regime|={self._diag_regime/n:.4f}"
-            )
+            self._log_diagnostics(action)
 
         # 7) Episode management
         done = (self.step_count >= self._episode_len) | (self.day >= self.max_step)
@@ -839,7 +859,12 @@ class NQWyckoffWeisVecEnv:
         # Auto-reset done envs
         if done.any():
             for i in th.where(done)[0].tolist():
-                self.cumulative_returns[i] = self.realized_pnl[i].item()
+                pnl_i = self.realized_pnl[i].item()
+                self.cumulative_returns[i] = pnl_i
+                self._diag_episodes_done += 1
+                self._diag_episode_pnl_sum += pnl_i
+                self._diag_episode_pnl_sq += pnl_i ** 2
+                self._diag_episode_trades_sum += self.total_trades[i].item()
             self._auto_reset(done)
 
         state = self.get_state()
@@ -1121,5 +1146,64 @@ class NQWyckoffWeisVecEnv:
         self.mae[mask] = 0.0
         self.total_trades[mask] = 0
 
+    # ─── Diagnostics ──────────────────────────────────────────────────────
+
+    def _log_diagnostics(self, action):
+        """Write comprehensive diagnostics to log file (and brief summary to stdout)."""
+        n = self._diag_steps
+        ne = self.num_envs
+
+        # Reward components (running averages)
+        r_pnl = self._diag_pnl / n
+        r_entry = self._diag_entry / n
+        r_mgmt = self._diag_mgmt / n
+        r_pen = self._diag_penalty / n
+        r_regime = self._diag_regime / n
+
+        # Action distribution (%)
+        total_actions = self._diag_action_counts.sum().item()
+        if total_actions > 0:
+            act_pct = (self._diag_action_counts.float() / total_actions * 100).tolist()
+        else:
+            act_pct = [0.0] * N_ACTIONS
+
+        # Position snapshot
+        pos_pct = (self.pos_side != 0).float().mean().item() * 100
+        long_pct = (self.pos_side > 0).float().mean().item() * 100
+        short_pct = (self.pos_side < 0).float().mean().item() * 100
+        avg_unreal = self.unrealized_pnl.mean().item()
+
+        # Episode stats
+        ep_done = self._diag_episodes_done
+        if ep_done > 0:
+            ep_pnl_mean = self._diag_episode_pnl_sum / ep_done
+            ep_pnl_var = self._diag_episode_pnl_sq / ep_done - ep_pnl_mean ** 2
+            ep_pnl_std = ep_pnl_var ** 0.5 if ep_pnl_var > 0 else 0.0
+            ep_trades_mean = self._diag_episode_trades_sum / ep_done
+        else:
+            ep_pnl_mean = ep_pnl_std = ep_trades_mean = 0.0
+
+        # Brief stdout
+        print(
+            f"[Diag] s={n} |pnl|={r_pnl:.4f} |ent|={r_entry:.4f} "
+            f"act=[H{act_pct[0]:.0f} EL{act_pct[1]:.0f} ES{act_pct[2]:.0f} "
+            f"A{act_pct[3]:.0f} R{act_pct[4]:.0f} X{act_pct[5]:.0f}] "
+            f"pos={pos_pct:.0f}% ep_pnl=${ep_pnl_mean:.0f}±{ep_pnl_std:.0f} "
+            f"trades={ep_trades_mean:.1f}",
+            flush=True
+        )
+
+        # Detailed CSV to file
+        if self._flog:
+            self._flog.write(
+                f"{n},{r_pnl:.6f},{r_entry:.6f},{r_mgmt:.6f},{r_pen:.6f},{r_regime:.6f},"
+                f"{act_pct[0]:.1f},{act_pct[1]:.1f},{act_pct[2]:.1f},"
+                f"{act_pct[3]:.1f},{act_pct[4]:.1f},{act_pct[5]:.1f},"
+                f"{ep_done},{ep_pnl_mean:.2f},{ep_pnl_std:.2f},{ep_trades_mean:.1f},"
+                f"{pos_pct:.1f},{long_pct:.1f},{short_pct:.1f},{avg_unreal:.2f}\n"
+            )
+
     def close(self):
-        pass
+        if self._flog:
+            self._flog.close()
+            self._flog = None
