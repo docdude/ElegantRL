@@ -48,37 +48,51 @@ ACTION_EXIT = 5
 N_ACTIONS = 6
 
 # ---------------------------------------------------------------------------
-# Feature selection from the 58-feature tech_ary (NPZ "tech_ary" column idx)
+# Feature selection from the 72-feature tech_ary (NPZ "tech_ary" column idx)
 #
 # Rationale: present the agent with a "prop-trader state" — bar micro-
 # structure, Weis wave context, Wyckoff event scores, phase probabilities,
 # and position state.  No sliding window needed because wave/event/phase
 # features already encode multi-bar temporal structure.
+#
+# Selection is driven by SFI (Single Feature Importance) ranking across
+# NQ 40pt, NQ 100pt, and US30 100pt datasets.  Features consistently in
+# the bottom 20% (SFI < 0.50) are dropped; top-10 features that were
+# previously missing are added.
+#
+# NOTE: reward-shaping functions (_entry_bonus, _regime_mismatch_penalty)
+# use raw tech_ary indices directly, not the selected feature vector.
+# Changing this list does NOT affect reward shaping.
 # ---------------------------------------------------------------------------
+
+# Legacy indices — kept for backward compatibility with existing checkpoints
+# and the live trading system (live_features.py has its own copy).
+ENV_FEATURE_INDICES_LEGACY = [
+    0, 1, 2, 4, 5, 8, 9, 11, 13, 14,
+    15, 16, 17, 18, 19, 21, 23, 27, 28, 29, 30, 34, 58, 59, 60,
+    35, 36, 37, 38, 39, 41,
+    48, 49, 50, 53, 54, 55, 56,
+    61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71,
+]
+
 ENV_FEATURE_INDICES = [
-    # ── Bar microstructure (10) ──
+    # ── Bar microstructure (7) ──
     0,   # body_ratio          — bar body/range, direction
-    1,   # upper_wick_ratio    — rejection at highs
-    2,   # lower_wick_ratio    — rejection at lows (spring context)
-    4,   # delta_ratio         — per-bar order flow direction
     5,   # vol_vs_ma20         — relative volume (effort)
-    8,   # duration_norm       — bar formation speed
+    7,   # er_ratio            — effort/result ratio [+SFI #28/40pt, #15/100pt]
     9,   # cvd_slope_fast      — short-term CVD trend
     11,  # cvd_divergence      — CVD vs price divergence
     13,  # return_5            — 5-bar momentum
     14,  # volatility_20       — realised vol regime
-    # ── Weis Wave (15) ──
-    15,  # wave_direction       — current wave direction ±1
+    # ── Weis Wave (12) ──
     16,  # wave_progress        — % into current wave
     17,  # wave_displacement_norm — price movement of current wave
     18,  # wave_vol_cumulative_norm — volume of current wave
     19,  # wave_delta_ratio     — order flow inside current wave
+    20,  # wave_vol_vs_same     — volume vs same-direction wave [+CiB core]
     21,  # wave_vol_vs_prev     — effort comparison (current vs prior)
     23,  # wave_disp_vs_prev    — displacement comparison (shortening)
-    27,  # demand_score_3wave   — 3-wave demand composite
-    28,  # supply_score_3wave   — 3-wave supply composite
-    29,  # wave_vol_trend_up    — up-wave volume trend
-    30,  # wave_vol_trend_down  — down-wave volume trend
+    24,  # wave_er_vs_same      — E/R vs same-dir wave [+SFI #8-9 everywhere]
     34,  # large_wave_score     — climactic-volume flag
     58,  # wave_effort_result_raw — absolute wave vol/displacement
     59,  # wave_time_norm       — wave calendar duration (normalized)
@@ -87,53 +101,45 @@ ENV_FEATURE_INDICES = [
     35,  # spring_score
     36,  # upthrust_score
     37,  # sc_score             — selling climax
-    38,  # bc_score             — buying climax
     39,  # absorption_score
     41,  # stopping_action_score
-    # ── Range / Phase Context (7) ──
+    42,  # bars_since_spring    [+SFI #1 on 100pt, #9 on 40pt]
+    43,  # bars_since_upthrust  [+SFI #11-17 everywhere]
+    # ── Range / Phase Context (6) ──
     48,  # pct_in_range         — position inside trading range
     49,  # range_width_norm     — range size (vol proxy)
-    50,  # bars_in_range        — time in current range
     53,  # phase_accum_score    — accumulation probability
-    54,  # phase_markup_score   — markup probability
     55,  # phase_distrib_score  — distribution probability
     56,  # phase_markdown_score — markdown probability
-    # ── Block 6: Library Weis Wave (NoLag_HighLow zigzag) (11) ──
+    47,  # event_sequence_bear  [+SFI #26 on US30]
+    # ── Block 6: Library Weis Wave (NoLag_HighLow zigzag) (8) ──
     61,  # lib_volume_strength   — categorical vol strength [0,1]
     62,  # lib_wave_vs_same_dir  — binary wave comparison (same-dir)
     63,  # lib_er_vs_same_dir    — binary E/R comparison (same-dir)
     64,  # lib_wave_vs_prev      — binary wave vs immediately previous
     65,  # lib_er_vs_prev        — binary E/R vs immediately previous
-    66,  # lib_large_wave        — large cumulative wave (yellow bar)
     67,  # lib_large_er          — large effort/result (yellow bar)
     68,  # lib_pivot_flag        — 1.0 at structural pivot
     69,  # lib_exhaust_up        — consecutive diminishing up-waves
-    70,  # lib_exhaust_down      — consecutive diminishing down-waves
-    71,  # lib_in_range          — trading range flag
 ]
 
-N_ENV_FEATURES = len(ENV_FEATURE_INDICES)   # 49
+N_ENV_FEATURES = len(ENV_FEATURE_INDICES)   # 44
 N_POSITION_FEATURES = 8                     # side, size, entry_dist, ...
 
 # Map from tech_ary column index → offset inside selected feature vector
 _EFI_LOOKUP = {col: i for i, col in enumerate(ENV_FEATURE_INDICES)}
 
-# Event column offsets (inside the 49-feature selected vector)
+# Event column offsets (inside the selected feature vector)
 COL_SPRING = _EFI_LOOKUP[35]
 COL_UPTHRUST = _EFI_LOOKUP[36]
 COL_SC = _EFI_LOOKUP[37]
-COL_BC = _EFI_LOOKUP[38]
 COL_ABSORPTION = _EFI_LOOKUP[39]
 COL_STOPPING = _EFI_LOOKUP[41]
 
 # Phase column offsets
 COL_PHASE_ACCUM = _EFI_LOOKUP[53]
-COL_PHASE_MARKUP = _EFI_LOOKUP[54]
 COL_PHASE_DISTRIB = _EFI_LOOKUP[55]
 COL_PHASE_MARKDOWN = _EFI_LOOKUP[56]
-
-# Wave direction column offset
-COL_WAVE_DIR = _EFI_LOOKUP[15]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -56,6 +56,32 @@ ADAPTIVE_UPPER_Q = 0.75
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Instrument Presets
+# ─────────────────────────────────────────────────────────────────────────────
+
+INSTRUMENT_PRESETS = {
+    "nq": {
+        "tick_size": 0.25,
+        "tick_value": 5.0,          # $5/tick → $20/point
+        "commission": 1.50,         # $/side/contract
+        "bar_range": 40.0,          # default range bar size (pts)
+        "pnl_norm": 10000.0,        # reward normalization (dense_pnl auto-overrides to 500)
+        "slippage_ticks": 1.0,
+    },
+    "us30": {
+        "tick_size": 1.0,
+        "tick_value": 1.0,          # $1/point (micro)
+        "commission": 1.00,         # $/side/contract (micro)
+        "bar_range": 100.0,         # 100pt range bars
+        "pnl_norm": 100.0,          # $100/bar-move → O(1) reward
+        "slippage_ticks": 1.0,
+    },
+}
+
+DEFAULT_INSTRUMENT = "nq"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Environment
 # ─────────────────────────────────────────────────────────────────────────────
 

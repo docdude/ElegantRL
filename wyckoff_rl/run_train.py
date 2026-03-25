@@ -56,6 +56,7 @@ from wyckoff_rl.config import (
     ADAPTIVE_N_SUBSPLITS, ADAPTIVE_LOWER_Q, ADAPTIVE_UPPER_Q,
     DEFAULT_ERL_PARAMS, DEFAULT_ENV_PARAMS,
     RANDOM_SEED, GPU_ID,
+    INSTRUMENT_PRESETS, DEFAULT_INSTRUMENT,
 )
 
 
@@ -131,12 +132,23 @@ def parse_args():
                         default=DEFAULT_ENV_PARAMS['trade_reward_weight'],
                         help="Trade-close bonus weight (0.0=bar-only, 0.5=adds trade PnL bonus)")
 
-    # NQ Wyckoff-Weis env params
+    # Instrument & env params
+    parser.add_argument("--instrument", type=str, default=None,
+                        choices=list(INSTRUMENT_PRESETS.keys()),
+                        help="Instrument preset (nq, us30). Overrides tick/commission defaults.")
+    parser.add_argument("--tick-size", type=float, default=None,
+                        help="Tick size (default: from instrument preset)")
+    parser.add_argument("--tick-value", type=float, default=None,
+                        help="Dollar value per tick (default: from instrument preset)")
+    parser.add_argument("--bar-range", type=float, default=None,
+                        help="Range bar size in points (default: from instrument preset)")
+    parser.add_argument("--pnl-norm", type=float, default=None,
+                        help="PnL normalization (default: from instrument preset)")
     parser.add_argument("--episode-len", type=int,
                         default=DEFAULT_ENV_PARAMS.get('episode_len', 1024))
-    parser.add_argument("--commission", type=float, default=1.50,
-                        help="$ per side per contract")
-    parser.add_argument("--slippage-ticks", type=float, default=1.0)
+    parser.add_argument("--commission", type=float, default=None,
+                        help="$ per side per contract (default: from instrument preset)")
+    parser.add_argument("--slippage-ticks", type=float, default=None)
     parser.add_argument("--max-pos", type=int, default=2,
                         help="Max position size (contracts)")
 
@@ -256,6 +268,24 @@ def main():
     env_params['sign_flip'] = not args.no_sign_flip
     env_params['continuous_sizing'] = args.continuous
     env_params['trade_reward_weight'] = args.trade_reward_weight
+
+    # Apply instrument preset, then CLI overrides
+    instrument = args.instrument or DEFAULT_INSTRUMENT
+    preset = INSTRUMENT_PRESETS[instrument]
+    env_params.update(preset)  # preset overrides defaults
+    # CLI overrides take priority over preset
+    if args.tick_size is not None:
+        env_params['tick_size'] = args.tick_size
+    if args.tick_value is not None:
+        env_params['tick_value'] = args.tick_value
+    if args.bar_range is not None:
+        env_params['bar_range'] = args.bar_range
+    if args.pnl_norm is not None:
+        env_params['pnl_norm'] = args.pnl_norm
+    if args.commission is not None:
+        env_params['commission'] = args.commission
+    if args.slippage_ticks is not None:
+        env_params['slippage_ticks'] = args.slippage_ticks
 
     # ── Output directory ─────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

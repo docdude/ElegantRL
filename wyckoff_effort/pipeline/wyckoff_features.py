@@ -1508,6 +1508,8 @@ def run_feature_pipeline(
     sfi_n_estimators: int = 100,
     sfi_n_splits: int = 5,
     subsample_importance: int = None,
+    tick_size: float = None,
+    symbol: str = None,
 ) -> dict:
     """
     Run the complete new-feature pipeline: SCID → 40pt bars → features → NPZ.
@@ -1556,6 +1558,11 @@ def run_feature_pipeline(
     bar_size = bar_size or RANGE_BAR_SIZE
     reversal_points = reversal_points or REVERSAL_POINTS
     output_dir = output_dir or OUTPUT_DIR
+    tick_size = tick_size or 0.25
+    # Auto-detect symbol from SCID filename if not provided
+    if symbol is None:
+        _fname = os.path.basename(scid_path).replace('.scid', '')
+        symbol = _fname.split('-')[0].split('.')[0].lower()
     os.makedirs(output_dir, exist_ok=True)
 
     t_start = time.time()
@@ -1568,11 +1575,11 @@ def run_feature_pipeline(
 
     # ── Step 2: Build range bars ─────────────────────────────────────────
     logger.info(f"Building {bar_size}pt range bars...")
-    bars_df = resample_range_bars(ticks, range_size=bar_size, tick_size=0.25)
+    bars_df = resample_range_bars(ticks, range_size=bar_size, tick_size=tick_size)
     logger.info(f"Built {len(bars_df):,} range bars")
 
     # Save bars parquet
-    bars_path = os.path.join(output_dir, f"wyckoff_nq_{int(bar_size)}pt_bars.parquet")
+    bars_path = os.path.join(output_dir, f"wyckoff_{symbol}_{int(bar_size)}pt_bars.parquet")
     bars_df.to_parquet(bars_path)
     logger.info(f"Saved bars: {bars_path}")
 
@@ -1591,7 +1598,7 @@ def run_feature_pipeline(
     else:
         dates_ary = np.arange(len(bars_df)).astype(str)
 
-    npz_path = os.path.join(output_dir, f"wyckoff_nq_{int(bar_size)}pt.npz")
+    npz_path = os.path.join(output_dir, f"wyckoff_{symbol}_{int(bar_size)}pt.npz")
     np.savez_compressed(
         npz_path,
         close_ary=close_ary,
@@ -1671,6 +1678,8 @@ if __name__ == "__main__":
             reversal_points=args.reversal,
             output_dir=args.output_dir,
             run_importance=not args.no_importance,
+            tick_size=getattr(args, 'tick_size', None),
+            symbol=getattr(args, 'symbol', None),
         )
         print(f"\nPipeline complete:")
         print(f"  Bars:     {result['n_bars']:,}")
@@ -1789,6 +1798,8 @@ examples:
     p_build.add_argument("--reversal", type=float, default=None, help="ZigZag reversal points")
     p_build.add_argument("--output-dir", type=str, default=None, help="Output directory")
     p_build.add_argument("--no-importance", action="store_true", help="Skip importance evaluation")
+    p_build.add_argument("--tick-size", type=float, default=None, help="Instrument tick size (NQ=0.25, US30=1.0)")
+    p_build.add_argument("--symbol", type=str, default=None, help="Symbol name for output files (auto-detected from SCID filename)")
 
     # ── verify ──
     p_verify = sub.add_parser("verify", help="Inspect NPZ: shape, stats, phase score check")
@@ -1802,6 +1813,8 @@ examples:
 
     args = parser.parse_args()
     if args.command == "build":
+        args.tick_size = getattr(args, 'tick_size', None)
+        args.symbol = getattr(args, 'symbol', None)
         _cmd_build(args)
     elif args.command == "verify":
         _cmd_verify(args)
