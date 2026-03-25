@@ -100,6 +100,8 @@ def parse_args():
     parser.add_argument("--reward", type=str, default=DEFAULT_ENV_PARAMS['reward_mode'],
                         choices=["dense_pnl", "sparse_exit", "pnl", "log_ret", "sharpe", "sortino"],
                         help="Reward function")
+    parser.add_argument("--no-sign-flip", action="store_true",
+                        help="Disable episode direction randomization")
     parser.add_argument("--npz", type=str, default=WYCKOFF_NPZ_PATH,
                         help="Path to Wyckoff NPZ data")
 
@@ -251,6 +253,7 @@ def main():
 
     env_params = DEFAULT_ENV_PARAMS.copy()
     env_params['reward_mode'] = args.reward
+    env_params['sign_flip'] = not args.no_sign_flip
     env_params['continuous_sizing'] = args.continuous
     env_params['trade_reward_weight'] = args.trade_reward_weight
 

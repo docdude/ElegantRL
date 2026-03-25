@@ -66,6 +66,7 @@ DEFAULT_ENV_PARAMS = {
     "initial_amount": 1000.0,       # in NQ points (legacy continuous env)
     "cost_per_trade": 0.5,          # points per side (legacy continuous env)
     "reward_mode": "dense_pnl",       # "dense_pnl", "sparse_exit", "pnl", "log_ret", "sharpe", "sortino"
+    "sign_flip": True,                # randomly flip long/short each episode to kill directional bias
     "reward_scale": 1.0,            # NQ discrete env handles its own scaling
     "num_envs": 4096,               # GPU-vectorized parallel episodes (auto-scaled to GPU memory)
     "episode_len": 2048,            # sub-episode length for PPO (~3.7 sub-episodes in 7.6K bars)

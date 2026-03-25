@@ -269,6 +269,7 @@ def train_split(
             'bar_range': env_params.get('bar_range', 40.0),
             'gamma': erl_params.get('gamma', 0.99),
             'reward_mode': env_params.get('reward_mode', 'dense_pnl'),
+            'sign_flip': env_params.get('sign_flip', True),
             'log_dir': cwd,
         }
 
@@ -278,6 +279,7 @@ def train_split(
             'end_idx': n_test,
             'npz_path': test_npz,
             'episode_len': None,  # eval walks full test data
+            'sign_flip': False,   # eval uses real directions
         })
     else:
         # ── Legacy continuous WyckoffTrading env ─────────────────────────

@@ -684,6 +684,7 @@ class NQWyckoffWeisVecEnv:
         feature_indices: list[int] | None = None,
         gamma: float = 0.99,            # kept for ElegantRL Config compat
         reward_mode: str = "dense_pnl", # "dense_pnl" or "sparse_exit"
+        sign_flip: bool = True,          # randomly flip long/short each episode
         log_dir: str = "",
         **kwargs,
     ):
@@ -691,6 +692,7 @@ class NQWyckoffWeisVecEnv:
             f"cuda:{gpu_id}" if (th.cuda.is_available() and gpu_id >= 0) else "cpu"
         )
         self.reward_mode = reward_mode
+        self.sign_flip = sign_flip
 
         # ── Load data ────────────────────────────────────────────────────
         close_ary, tech_ary = _load_npz(npz_path)
@@ -774,6 +776,12 @@ class NQWyckoffWeisVecEnv:
         self._col_phase_distrib = 55
         self._col_phase_markdown = 56
 
+        # ── Direction flip: randomly mirror long/short per episode ──────
+        # Eliminates directional bias exploitation on trending data.
+        # flip=+1: normal, flip=-1: ENTER_LONG↔ENTER_SHORT swapped,
+        # pos_side flipped in observation so agent can't detect flip.
+        self.direction_flip = None  # (ne,) float: +1 or -1
+
         # ── Per-env state (allocated in reset) ───────────────────────────
         self.day = None             # (ne,) long — bar index
         self.step_count = None      # (ne,) long — steps in current episode
@@ -832,6 +840,7 @@ class NQWyckoffWeisVecEnv:
             f"drift_per_bar=local_rolling_50 "
             f"drift_mean={self.drift_per_bar.mean().item():.4f}pts "
             f"drift_std={self.drift_per_bar.std().item():.4f}pts "
+            f"sign_flip={self.sign_flip} "
             f"carry_cost={self.carry_cost} idle_penalty={self.idle_penalty} "
             f"entry_bonus={self.entry_bonus_scale} vesting_bars={self.vesting_bars} "
             f"regime_penalty={self.regime_penalty_scale} "
@@ -857,6 +866,15 @@ class NQWyckoffWeisVecEnv:
         self.vesting_remaining = th.zeros(ne, dtype=th.long, device=dev)
         self.total_trades = th.zeros(ne, dtype=th.long, device=dev)
         self.cumulative_returns = [0.0] * ne
+
+        # Direction flip
+        if self.sign_flip:
+            self.direction_flip = th.where(
+                th.rand(ne, device=dev) < 0.5,
+                th.ones(ne, device=dev), -th.ones(ne, device=dev),
+            )
+        else:
+            self.direction_flip = th.ones(ne, dtype=th.float32, device=dev)
 
         if self._stagger:
             max_start = max(50, self.max_step - self._episode_len)
@@ -887,8 +905,13 @@ class NQWyckoffWeisVecEnv:
             th.zeros_like(self.pos_side),
         )
 
+        # Apply direction flip: agent sees its *intended* direction,
+        # not the actual one.  All other position features (entry_dist,
+        # unrealized, mfe, mae) are already direction-agnostic (positive=winning).
+        obs_side = self.pos_side * self.direction_flip
+
         pos_feats = th.stack([
-            self.pos_side,
+            obs_side,
             self.pos_size / max(self.max_position_size, 1.0),
             entry_dist,
             self.unrealized_pnl / self.pnl_norm,
@@ -919,6 +942,14 @@ class NQWyckoffWeisVecEnv:
         if action.dim() == 2:
             action = action[:, 0]
         action = action.long()
+
+        # 0) Direction flip: swap ENTER_LONG ↔ ENTER_SHORT for flipped envs
+        if self.sign_flip:
+            flipped = self.direction_flip < 0
+            is_el = action == ACTION_ENTER_LONG
+            is_es = action == ACTION_ENTER_SHORT
+            action = th.where(flipped & is_el, th.full_like(action, ACTION_ENTER_SHORT), action)
+            action = th.where(flipped & is_es, th.full_like(action, ACTION_ENTER_LONG), action)
 
         # 1) Snapshot pre-action state for reward computation
         prev_price = self.close_price[self.day]
@@ -1353,6 +1384,14 @@ class NQWyckoffWeisVecEnv:
         self.vesting_amount[mask] = 0.0
         self.vesting_remaining[mask] = 0
         self.total_trades[mask] = 0
+
+        # Re-randomize direction flip for reset envs
+        if self.sign_flip:
+            n = mask.sum().item()
+            self.direction_flip[mask] = th.where(
+                th.rand(n, device=self.device) < 0.5,
+                th.ones(n, device=self.device), -th.ones(n, device=self.device),
+            )
 
     # ─── Diagnostics ──────────────────────────────────────────────────────
 
