@@ -946,7 +946,7 @@ class NQWyckoffWeisVecEnv:
         if self.reward_mode == 'dense_pnl':
             # ─── Dense equity-change reward ───────────────────────────
             # Total PnL = realized + unrealized.  Reward = detrended
-            # per-step change in total equity.
+            # per-step change in total equity, normalized per contract.
             #
             # Properties:
             #   flat       → reward = 0 (no position, no PnL)
@@ -956,6 +956,7 @@ class NQWyckoffWeisVecEnv:
             #   exit       → reward = −slip − commission (friction cost)
             #   churn      → cumulative negative (commission drain)
             #   always-hold-random → ~0 in expectation (drift detrended)
+            #   ADD more   → same per-contract reward (no amplification)
             #
             # No carry cost, no entry bonus, no vesting, no regime
             # penalty, no idle penalty, no management bonus.
@@ -970,10 +971,15 @@ class NQWyckoffWeisVecEnv:
             drift_dollars = (drift_pts / self.tick_size) * self.tick_value * post_side * post_size
             detrended_change = equity_change - drift_dollars
 
-            reward = (detrended_change / self.pnl_norm - penalty) * self.reward_scale
+            # Normalize per contract: prevents position-maximization exploit
+            # where agent learns ADD→max to amplify reward variance.
+            # flat (post_size=0) → clamp to 1 (equity_change=0 anyway)
+            per_contract = detrended_change / post_size.clamp(min=1.0)
+
+            reward = (per_contract / self.pnl_norm - penalty) * self.reward_scale
 
             # Diagnostics (reuse existing accumulators)
-            pnl_delta = detrended_change / self.pnl_norm
+            pnl_delta = per_contract / self.pnl_norm
             exit_pnl = (self.realized_pnl - prev_realized) / self.pnl_norm
             entry_bonus = th.zeros_like(reward)
             mgmt_bonus = th.zeros_like(reward)
