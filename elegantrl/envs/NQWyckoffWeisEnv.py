@@ -683,13 +683,14 @@ class NQWyckoffWeisVecEnv:
         bar_range: float = 40.0,
         feature_indices: list[int] | None = None,
         gamma: float = 0.99,            # kept for ElegantRL Config compat
-        reward_mode: str = "pnl",       # kept for Config compat
+        reward_mode: str = "dense_pnl", # "dense_pnl" or "sparse_exit"
         log_dir: str = "",
         **kwargs,
     ):
         self.device = th.device(
             f"cuda:{gpu_id}" if (th.cuda.is_available() and gpu_id >= 0) else "cpu"
         )
+        self.reward_mode = reward_mode
 
         # ── Load data ────────────────────────────────────────────────────
         close_ary, tech_ary = _load_npz(npz_path)
@@ -724,8 +725,14 @@ class NQWyckoffWeisVecEnv:
         self.idle_penalty = idle_penalty
         self.carry_cost = carry_cost
         self.vesting_bars = vesting_bars
+        # Dense PnL mode: lower normalization so per-bar PnL ≈ O(1) for PPO
+        # and wider clip to preserve reward granularity
+        if self.reward_mode == 'dense_pnl' and pnl_norm > 1000:
+            pnl_norm = 500.0  # median bar = 29pts × $20 = $580 → reward ≈ 1.16
+        if self.reward_mode == 'dense_pnl' and reward_clip < 5.0:
+            reward_clip = 5.0
         self.reward_clip = reward_clip
-        self.pnl_norm = pnl_norm  # $2000 default – 40pt 2-lot = 0.8 (no clip)
+        self.pnl_norm = pnl_norm
         self.bar_range = bar_range  # range bar size for ATR normalization
         self.gamma = gamma
 
@@ -821,7 +828,7 @@ class NQWyckoffWeisVecEnv:
 
         # Startup banner — confirms new code is loaded
         print(
-            f"[VecEnv] SPARSE_EXIT pnl_norm={self.pnl_norm} "
+            f"[VecEnv] reward_mode={self.reward_mode} pnl_norm={self.pnl_norm} "
             f"drift_per_bar=local_rolling_50 "
             f"drift_mean={self.drift_per_bar.mean().item():.4f}pts "
             f"drift_std={self.drift_per_bar.std().item():.4f}pts "
@@ -913,21 +920,18 @@ class NQWyckoffWeisVecEnv:
             action = action[:, 0]
         action = action.long()
 
-        # 1) Snapshot pre-action state for reward gating
+        # 1) Snapshot pre-action state for reward computation
         prev_price = self.close_price[self.day]
-        prev_side = self.pos_side.clone()  # needed to gate entry bonus
-        prev_realized = self.realized_pnl.clone()  # for sparse exit reward
+        prev_side = self.pos_side.clone()
+        prev_realized = self.realized_pnl.clone()
+        prev_unrealized = self.unrealized_pnl.clone()
 
         # 2) Execute discrete actions
         penalty = self._execute_actions(action)
 
         # 3) Snapshot post-action position for correct credit assignment
-        #    (entry actions now get PnL credit on the bar they enter)
         post_side = self.pos_side.clone()
         post_size = self.pos_size.clone()
-
-        # Sparse exit reward: realized PnL only on trade close/reduce
-        exit_pnl = (self.realized_pnl - prev_realized) / self.pnl_norm
 
         # 4) Advance bar
         self.day = th.clamp(self.day + 1, max=self.max_step)
@@ -936,59 +940,90 @@ class NQWyckoffWeisVecEnv:
         # 5) Mark-to-market
         self._mark_to_market()
 
-        # 6) Reward — sparse exit PnL + shaping signals
-        #    Dense per-step PnL removed: it causes position-maximization.
-        #    PnL only realized on EXIT/REDUCE via exit_pnl above.
-        #    Dense pnl_delta kept for diagnostics only (not in reward).
+        # 6) Reward computation — branched by reward_mode
         curr_price = self.close_price[self.day]
-        just_entered = (action == ACTION_ENTER_LONG) | (action == ACTION_ENTER_SHORT)
-        was_flat = (prev_price == self.entry_price)  # stale check
-        # Entry bar baseline = entry_price (includes slippage), else prev bar close
-        baseline = th.where(
-            just_entered & (self.pos_side.abs() > 0),
-            self.entry_price,
-            prev_price,
-        )
-        price_change = curr_price - baseline
-        # Detrend: subtract local rolling drift so passive directional → ~0 reward
-        detrended_change = price_change - self.drift_per_bar[self.day]
-        ticks = (detrended_change / self.tick_size) * post_side
-        holding_pnl = ticks * self.tick_value * post_size
-        pnl_delta = holding_pnl / self.pnl_norm
 
-        # Entry bonus: deferred until vesting_bars of holding
-        # On entry with valid signal, store the bonus; pay it only after
-        # the agent has held for vesting_bars (forfeit if exiting early)
-        raw_entry_bonus = self._compute_entry_bonus(action)
-        # Gate: only award bonus when entering from FLAT (prevent flip farming)
-        was_flat = prev_side == 0
-        raw_entry_bonus = th.where(was_flat, raw_entry_bonus, th.zeros_like(raw_entry_bonus))
-        has_new_bonus = raw_entry_bonus > 0
-        if has_new_bonus.any():
-            self.vesting_amount = th.where(has_new_bonus, raw_entry_bonus, self.vesting_amount)
-            self.vesting_remaining = th.where(has_new_bonus,
-                                              th.full_like(self.vesting_remaining, self.vesting_bars),
+        if self.reward_mode == 'dense_pnl':
+            # ─── Dense equity-change reward ───────────────────────────
+            # Total PnL = realized + unrealized.  Reward = detrended
+            # per-step change in total equity.
+            #
+            # Properties:
+            #   flat       → reward = 0 (no position, no PnL)
+            #   good hold  → reward > 0 (price moved in our favour)
+            #   bad hold   → reward < 0 (natural stop-loss signal)
+            #   entry      → reward = first bar move − commission − slip
+            #   exit       → reward = −slip − commission (friction cost)
+            #   churn      → cumulative negative (commission drain)
+            #   always-hold-random → ~0 in expectation (drift detrended)
+            #
+            # No carry cost, no entry bonus, no vesting, no regime
+            # penalty, no idle penalty, no management bonus.
+            # Only shaping signal: invalid-action penalty.
+            prev_equity = prev_realized + prev_unrealized
+            curr_equity = self.realized_pnl + self.unrealized_pnl
+            equity_change = curr_equity - prev_equity
+
+            # Detrend: remove expected passive gain/loss from drift
+            # so holding a random directional position → ~0 expected reward
+            drift_pts = self.drift_per_bar[self.day]
+            drift_dollars = (drift_pts / self.tick_size) * self.tick_value * post_side * post_size
+            detrended_change = equity_change - drift_dollars
+
+            reward = (detrended_change / self.pnl_norm - penalty) * self.reward_scale
+
+            # Diagnostics (reuse existing accumulators)
+            pnl_delta = detrended_change / self.pnl_norm
+            exit_pnl = (self.realized_pnl - prev_realized) / self.pnl_norm
+            entry_bonus = th.zeros_like(reward)
+            mgmt_bonus = th.zeros_like(reward)
+            regime_penalty = th.zeros_like(reward)
+            carry = th.zeros_like(reward)
+
+        else:
+            # ─── Legacy sparse-exit reward ────────────────────────────
+            # Realized PnL only on trade close/reduce + shaped signals.
+            exit_pnl = (self.realized_pnl - prev_realized) / self.pnl_norm
+
+            just_entered = (action == ACTION_ENTER_LONG) | (action == ACTION_ENTER_SHORT)
+            baseline = th.where(
+                just_entered & (self.pos_side.abs() > 0),
+                self.entry_price,
+                prev_price,
+            )
+            price_change = curr_price - baseline
+            detrended_change = price_change - self.drift_per_bar[self.day]
+            ticks = (detrended_change / self.tick_size) * post_side
+            holding_pnl = ticks * self.tick_value * post_size
+            pnl_delta = holding_pnl / self.pnl_norm
+
+            # Entry bonus with vesting
+            raw_entry_bonus = self._compute_entry_bonus(action)
+            was_flat = prev_side == 0
+            raw_entry_bonus = th.where(was_flat, raw_entry_bonus, th.zeros_like(raw_entry_bonus))
+            has_new_bonus = raw_entry_bonus > 0
+            if has_new_bonus.any():
+                self.vesting_amount = th.where(has_new_bonus, raw_entry_bonus, self.vesting_amount)
+                self.vesting_remaining = th.where(has_new_bonus,
+                                                  th.full_like(self.vesting_remaining, self.vesting_bars),
+                                                  self.vesting_remaining)
+            still_vesting = self.vesting_remaining > 0
+            self.vesting_remaining = th.where(still_vesting,
+                                              self.vesting_remaining - 1,
                                               self.vesting_remaining)
-        # Tick down and pay when vesting completes
-        still_vesting = self.vesting_remaining > 0
-        self.vesting_remaining = th.where(still_vesting,
-                                          self.vesting_remaining - 1,
-                                          self.vesting_remaining)
-        vesting_done = still_vesting & (self.vesting_remaining == 0)
-        entry_bonus = th.where(vesting_done, self.vesting_amount,
-                               th.zeros_like(self.vesting_amount))
-        self.vesting_amount = th.where(vesting_done,
-                                       th.zeros_like(self.vesting_amount),
-                                       self.vesting_amount)
+            vesting_done = still_vesting & (self.vesting_remaining == 0)
+            entry_bonus = th.where(vesting_done, self.vesting_amount,
+                                   th.zeros_like(self.vesting_amount))
+            self.vesting_amount = th.where(vesting_done,
+                                           th.zeros_like(self.vesting_amount),
+                                           self.vesting_amount)
 
-        mgmt_bonus = self._compute_management_bonus(action)
-        regime_penalty = self._compute_regime_mismatch_penalty(action)
+            mgmt_bonus = self._compute_management_bonus(action)
+            regime_penalty = self._compute_regime_mismatch_penalty(action)
+            carry = self.carry_cost * post_size
 
-        # Carry cost: per-bar cost scaled by position size (1 lot = 1×, 2 lots = 2×)
-        carry = self.carry_cost * post_size
-
-        reward = (exit_pnl + entry_bonus + mgmt_bonus
-                  - penalty - regime_penalty - carry) * self.reward_scale
+            reward = (exit_pnl + entry_bonus + mgmt_bonus
+                      - penalty - regime_penalty - carry) * self.reward_scale
         if self.reward_clip > 0:
             reward = th.clamp(reward, -self.reward_clip, self.reward_clip)
 

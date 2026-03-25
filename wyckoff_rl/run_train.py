@@ -98,7 +98,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="discrete_ppo",
                         choices=["discrete_ppo", "ppo", "wyckoff_ppo", "wyckoff_wave_ppo", "sac", "td3"])
     parser.add_argument("--reward", type=str, default=DEFAULT_ENV_PARAMS['reward_mode'],
-                        choices=["pnl", "log_ret", "sharpe", "sortino"],
+                        choices=["dense_pnl", "sparse_exit", "pnl", "log_ret", "sharpe", "sortino"],
                         help="Reward function")
     parser.add_argument("--npz", type=str, default=WYCKOFF_NPZ_PATH,
                         help="Path to Wyckoff NPZ data")

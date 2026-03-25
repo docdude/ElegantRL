@@ -268,7 +268,7 @@ def train_split(
             'pnl_norm': 10000.0,
             'bar_range': env_params.get('bar_range', 40.0),
             'gamma': erl_params.get('gamma', 0.99),
-            'reward_mode': env_params.get('reward_mode', 'pnl'),
+            'reward_mode': env_params.get('reward_mode', 'dense_pnl'),
             'log_dir': cwd,
         }
 
@@ -389,7 +389,7 @@ def train_split(
     print(f"  state_dim:  {state_dim}")
     print(f"  num_envs:   {num_envs}")
     print(f"  num_workers: {_num_workers}")
-    print(f"  Reward:     {env_params.get('reward_mode', 'pnl')}")
+    print(f"  Reward:     {env_params.get('reward_mode', 'dense_pnl')}")
     print(f"  break_step: {args.break_step:,}")
 
     # ── 4. Train ─────────────────────────────────────────────────────────
