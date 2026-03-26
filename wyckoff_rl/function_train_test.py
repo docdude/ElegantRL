@@ -105,6 +105,7 @@ def train_split(
     gpu_id: int = GPU_ID,
     random_seed: int = RANDOM_SEED,
     continue_train: bool = False,
+    bc_checkpoint: str = None,
 ) -> dict:
     """
     Train a DRL agent on one CPCV split.
@@ -356,6 +357,7 @@ def train_split(
     args.random_seed = seed
     args.cwd = cwd
     args.continue_train = continue_train
+    args.bc_checkpoint = bc_checkpoint
     args.if_remove = not continue_train
     args.if_keep_save = True
     args.if_over_write = False

@@ -20,6 +20,29 @@ if os.name == 'nt':  # if is WindowOS (Windows NT)
     """
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+
+def _load_bc_checkpoint(agent, args: Config):
+    """Load behavioral cloning pre-trained actor weights if bc_checkpoint is set."""
+    bc_path = getattr(args, 'bc_checkpoint', None)
+    if not bc_path:
+        return
+    if not os.path.exists(bc_path):
+        print(f"| WARNING: bc_checkpoint not found: {bc_path}")
+        return
+
+    ckpt = th.load(bc_path, map_location=agent.device, weights_only=True)
+    actor_sd = ckpt.get('actor_state_dict', ckpt)
+    agent.act.load_state_dict(actor_sd, strict=False)
+
+    # Load normalization stats
+    if 'state_avg' in ckpt:
+        agent.act.state_avg.data = ckpt['state_avg'].to(agent.device)
+    if 'state_std' in ckpt:
+        agent.act.state_std.data = ckpt['state_std'].to(agent.device)
+
+    print(f"| Loaded BC actor from {bc_path} (val_acc={ckpt.get('val_acc', '?')})")
+
+
 '''train'''
 
 
@@ -55,6 +78,7 @@ def train_agent_single_process(args: Config):
     agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
     if args.continue_train:
         agent.save_or_load_agent(args.cwd, if_save=False)
+    _load_bc_checkpoint(agent, args)
 
     '''init agent.last_state'''
     state, info_dict = env.reset()
@@ -259,6 +283,7 @@ class Learner(Process):
         agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
         if args.continue_train:
             agent.save_or_load_agent(args.cwd, if_save=False)
+        _load_bc_checkpoint(agent, args)
 
         '''Learner init buffer'''
         if args.if_off_policy:
@@ -414,6 +439,7 @@ class Worker(Process):
         agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
         if args.continue_train:
             agent.save_or_load_agent(args.cwd, if_save=False)
+        _load_bc_checkpoint(agent, args)
 
         '''init agent.last_state'''
         state, info_dict = env.reset()

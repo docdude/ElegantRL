@@ -163,6 +163,8 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--continue", dest="continue_train", action="store_true")
     parser.add_argument("--cwd", type=str, default=None)
+    parser.add_argument("--bc-checkpoint", type=str, default=None,
+                        help="Path to BC pre-trained actor checkpoint (.pt) for warm-start")
 
     return parser.parse_args()
 
@@ -364,6 +366,7 @@ def main():
             gpu_id=args.gpu,
             random_seed=args.seed,
             continue_train=args.continue_train,
+            bc_checkpoint=args.bc_checkpoint,
         )
         results.append(result)
         print(f"\n  Split {idx} done: {result}")
