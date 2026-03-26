@@ -149,6 +149,9 @@ def parse_args():
     parser.add_argument("--commission", type=float, default=None,
                         help="$ per side per contract (default: from instrument preset)")
     parser.add_argument("--slippage-ticks", type=float, default=None)
+    parser.add_argument("--carry-multiplier", type=float, default=0.0,
+                        help="Auto-calibrate carry cost from data. 0=use fixed carry_cost. "
+                             "1.0=break-even, 1.5=make untargeted positioning unprofitable.")
     parser.add_argument("--max-pos", type=int, default=2,
                         help="Max position size (contracts)")
 
@@ -286,6 +289,8 @@ def main():
         env_params['commission'] = args.commission
     if args.slippage_ticks is not None:
         env_params['slippage_ticks'] = args.slippage_ticks
+    if args.carry_multiplier > 0:
+        env_params['carry_multiplier'] = args.carry_multiplier
 
     # ── Output directory ─────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

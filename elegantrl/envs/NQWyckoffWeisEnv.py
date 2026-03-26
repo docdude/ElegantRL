@@ -732,6 +732,7 @@ class NQWyckoffWeisVecEnv:
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
         self.carry_cost = carry_cost
+        self.carry_multiplier = kwargs.get('carry_multiplier', 0.0)
         self.vesting_bars = vesting_bars
         # Dense PnL mode: lower normalization so per-bar PnL ≈ O(1) for PPO
         # and wider clip to preserve reward granularity
@@ -743,6 +744,20 @@ class NQWyckoffWeisVecEnv:
         self.pnl_norm = pnl_norm
         self.bar_range = bar_range  # range bar size for ATR normalization
         self.gamma = gamma
+
+        # ── Auto-calibrate carry cost for dense_pnl mode ─────────────
+        # When carry_multiplier > 0, compute carry_cost from data so that
+        # staying positioned without alpha is slightly unprofitable.
+        # carry_cost = E[|bar_change|] * (tick_value/tick_size) / pnl_norm * multiplier
+        if self.carry_multiplier > 0 and self.reward_mode == 'dense_pnl':
+            bar_changes = np.diff(close_ary.flatten(), prepend=close_ary.flatten()[0])
+            mean_abs_change = float(np.abs(bar_changes).mean())
+            expected_abs_pnl = mean_abs_change * (tick_value / tick_size)
+            self.carry_cost = (expected_abs_pnl / self.pnl_norm) * self.carry_multiplier
+            print(f"[VecEnv] auto-carry: E[|bar|]={mean_abs_change:.2f}pts "
+                  f"E[|pnl|]=${expected_abs_pnl:.2f}/contract "
+                  f"carry_cost={self.carry_cost:.6f}/bar "
+                  f"(multiplier={self.carry_multiplier:.2f})", flush=True)
 
         # Local drift detrending: per-bar rolling mean of prior price changes.
         # Removes LOCAL trend bias so passive long/short → ~0 expected reward.
@@ -981,23 +996,17 @@ class NQWyckoffWeisVecEnv:
         curr_price = self.close_price[self.day]
 
         if self.reward_mode == 'dense_pnl':
-            # ─── Dense equity-change reward ───────────────────────────
-            # Total PnL = realized + unrealized.  Reward = detrended
-            # per-step change in total equity, normalized per contract.
+            # ─── Dense equity-change reward + shaping signals ─────────
+            # Base: detrended per-step equity change, normalized per contract.
+            # Shaping: carry cost (position holding tax), entry bonus
+            # (Wyckoff signal reward), regime penalty (wrong-phase entry).
             #
             # Properties:
             #   flat       → reward = 0 (no position, no PnL)
-            #   good hold  → reward > 0 (price moved in our favour)
-            #   bad hold   → reward < 0 (natural stop-loss signal)
-            #   entry      → reward = first bar move − commission − slip
-            #   exit       → reward = −slip − commission (friction cost)
-            #   churn      → cumulative negative (commission drain)
-            #   always-hold-random → ~0 in expectation (drift detrended)
-            #   ADD more   → same per-contract reward (no amplification)
-            #
-            # No carry cost, no entry bonus, no vesting, no regime
-            # penalty, no idle penalty, no management bonus.
-            # Only shaping signal: invalid-action penalty.
+            #   good hold  → reward > 0 minus carry
+            #   bad hold   → reward < 0 minus carry
+            #   always-hold-no-alpha → slightly negative (carry > E[|pnl|])
+            #   signal entry → entry bonus offsets carry during trade
             prev_equity = prev_realized + prev_unrealized
             curr_equity = self.realized_pnl + self.unrealized_pnl
             equity_change = curr_equity - prev_equity
@@ -1013,15 +1022,40 @@ class NQWyckoffWeisVecEnv:
             # flat (post_size=0) → clamp to 1 (equity_change=0 anyway)
             per_contract = detrended_change / post_size.clamp(min=1.0)
 
-            reward = (per_contract / self.pnl_norm - penalty) * self.reward_scale
-
-            # Diagnostics (reuse existing accumulators)
             pnl_delta = per_contract / self.pnl_norm
             exit_pnl = (self.realized_pnl - prev_realized) / self.pnl_norm
-            entry_bonus = th.zeros_like(reward)
-            mgmt_bonus = th.zeros_like(reward)
-            regime_penalty = th.zeros_like(reward)
-            carry = th.zeros_like(reward)
+
+            # ── Carry cost: makes untargeted positioning unprofitable ──
+            carry = self.carry_cost * post_size
+
+            # ── Entry bonus with vesting (same as sparse_exit) ─────────
+            raw_entry_bonus = self._compute_entry_bonus(action)
+            was_flat = prev_side == 0
+            raw_entry_bonus = th.where(was_flat, raw_entry_bonus, th.zeros_like(raw_entry_bonus))
+            has_new_bonus = raw_entry_bonus > 0
+            if has_new_bonus.any():
+                self.vesting_amount = th.where(has_new_bonus, raw_entry_bonus, self.vesting_amount)
+                self.vesting_remaining = th.where(has_new_bonus,
+                                                  th.full_like(self.vesting_remaining, self.vesting_bars),
+                                                  self.vesting_remaining)
+            still_vesting = self.vesting_remaining > 0
+            self.vesting_remaining = th.where(still_vesting,
+                                              self.vesting_remaining - 1,
+                                              self.vesting_remaining)
+            vesting_done = still_vesting & (self.vesting_remaining == 0)
+            entry_bonus = th.where(vesting_done, self.vesting_amount,
+                                   th.zeros_like(self.vesting_amount))
+            self.vesting_amount = th.where(vesting_done,
+                                           th.zeros_like(self.vesting_amount),
+                                           self.vesting_amount)
+
+            # ── Regime penalty ─────────────────────────────────────────
+            regime_penalty = self._compute_regime_mismatch_penalty(action)
+
+            mgmt_bonus = th.zeros_like(pnl_delta)
+
+            reward = (pnl_delta + entry_bonus + mgmt_bonus
+                      - penalty - regime_penalty - carry) * self.reward_scale
 
         else:
             # ─── Legacy sparse-exit reward ────────────────────────────

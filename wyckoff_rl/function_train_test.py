@@ -264,6 +264,7 @@ def train_split(
             'regime_penalty_scale': 0.05,
             'idle_penalty': 0.0,
             'carry_cost': 0.020,
+            'carry_multiplier': env_params.get('carry_multiplier', 0.0),
             'vesting_bars': 1,
             'pnl_norm': env_params.get('pnl_norm', 10000.0),
             'bar_range': env_params.get('bar_range', 40.0),
