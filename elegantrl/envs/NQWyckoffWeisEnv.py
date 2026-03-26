@@ -141,6 +141,14 @@ COL_PHASE_ACCUM = _EFI_LOOKUP[53]
 COL_PHASE_DISTRIB = _EFI_LOOKUP[55]
 COL_PHASE_MARKDOWN = _EFI_LOOKUP[56]
 
+# CiB (Change in Behavior) detection thresholds
+# From walk-forward validation: PF 3.3-6.6 OOS on US30 100pt
+# Walk-forward uses 0.60 but also requires expansion > max(prior 10 same-dir)
+# Tighter ratio compensates for missing expansion criterion.
+CIB_MAX_PB_VOL_RATIO = 0.40   # pullback vol < 40% of expansion vol
+CIB_MIN_PB_VOL_RATIO = 0.05   # filter barely-started waves
+CIB_MAX_LARGE_WAVE   = 0.50   # pullback must be below-average volume
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -520,38 +528,59 @@ class NQWyckoffWeisEnv:
     # ─── Entry bonus ──────────────────────────────────────────────────────
 
     def _entry_bonus(self, action: int) -> float:
-        feats = self.tech_ary[self._t]  # full 61-feature row
+        feats = self.tech_ary[self._t]  # full 72-feature row
         bonus = 0.0
         thr = self.event_threshold
         scale = self.entry_bonus_scale
 
         if action == ACTION_ENTER_LONG:
+            # Reversal: Spring
             if feats[35] > thr:           # spring_score
                 bonus += scale
             if feats[39] > thr and feats[15] > 0:  # absorption + up-wave
                 bonus += scale * 0.6
             if feats[41] > thr and feats[15] > 0:  # stopping_action + up-wave
                 bonus += scale * 0.4
+            # CiB continuation: in DOWN pullback with weak vol → enter long
+            vol_ratio = feats[21]  # wave_vol_vs_prev
+            lw_score = feats[34]   # large_wave_score (pullback below avg)
+            if (feats[15] < 0
+                    and CIB_MIN_PB_VOL_RATIO < vol_ratio < CIB_MAX_PB_VOL_RATIO
+                    and lw_score < CIB_MAX_LARGE_WAVE):
+                bonus += scale
 
         elif action == ACTION_ENTER_SHORT:
+            # Reversal: Upthrust
             if feats[36] > thr:           # upthrust_score
                 bonus += scale
             if feats[39] > thr and feats[15] < 0:  # absorption + down-wave
                 bonus += scale * 0.6
             if feats[41] > thr and feats[15] < 0:  # stopping_action + down-wave
                 bonus += scale * 0.4
+            # CiB continuation: in UP pullback with weak vol → enter short
+            vol_ratio = feats[21]  # wave_vol_vs_prev
+            lw_score = feats[34]   # large_wave_score (pullback below avg)
+            if (feats[15] > 0
+                    and CIB_MIN_PB_VOL_RATIO < vol_ratio < CIB_MAX_PB_VOL_RATIO
+                    and lw_score < CIB_MAX_LARGE_WAVE):
+                bonus += scale
 
         return min(bonus, scale)  # cap stacking to 1× scale
 
     # ─── Management bonus ─────────────────────────────────────────────────
 
     def _has_entry_signal(self) -> bool:
-        """Check if a primary Wyckoff event signal (spring/upthrust) is active."""
+        """Check if a primary Wyckoff event signal (spring/upthrust/CiB) is active."""
         feats = self.tech_ary[self._t]
         thr = self.event_threshold
+        vol_ratio = feats[21]  # wave_vol_vs_prev
+        lw_score = feats[34]   # large_wave_score
+        cib_active = (CIB_MIN_PB_VOL_RATIO < vol_ratio < CIB_MAX_PB_VOL_RATIO
+                      and lw_score < CIB_MAX_LARGE_WAVE)
         return bool(
             feats[35] > thr or   # spring  (~1% of bars)
-            feats[36] > thr      # upthrust (~4% of bars)
+            feats[36] > thr or   # upthrust (~4% of bars)
+            cib_active            # CiB pullback setup
         )
 
     def _management_bonus(self, action: int) -> float:
@@ -796,6 +825,9 @@ class NQWyckoffWeisVecEnv:
         self._col_phase_markup = 54
         self._col_phase_distrib = 55
         self._col_phase_markdown = 56
+        # CiB (Change in Behavior) columns
+        self._col_wave_vol_vs_prev = 21  # pullback vol / expansion vol
+        self._col_large_wave = 34        # wave vol / avg(last 4 completed)
 
         # ── Direction flip: randomly mirror long/short per episode ──────
         # Eliminates directional bias exploitation on trending data.
@@ -1311,6 +1343,23 @@ class NQWyckoffWeisVecEnv:
         stop_short = is_short_entry & (stopping > thr) & (wave_dir < 0)
         bonus = th.where(stop_short, bonus + scale * 0.4, bonus)
 
+        # ── CiB (Change in Behavior) continuation pattern ──
+        # Detect weak pullback after strong expansion wave.
+        # wave_vol_vs_prev < 0.40 during pullback → CiB setup (PF 3.3-6.6 OOS)
+        # large_wave_score < 0.50 ensures pullback is below-average volume
+        # (proxy for expansion being above-average)
+        vol_vs_prev = self.tech_factor[self.day, self._col_wave_vol_vs_prev]
+        large_wave = self.tech_factor[self.day, self._col_large_wave]
+        cib_pullback = ((vol_vs_prev > CIB_MIN_PB_VOL_RATIO)
+                        & (vol_vs_prev < CIB_MAX_PB_VOL_RATIO)
+                        & (large_wave < CIB_MAX_LARGE_WAVE))
+        # Bullish CiB: in DOWN pullback → enter long (continuation of prior UP)
+        cib_bull = is_long_entry & (wave_dir < 0) & cib_pullback
+        bonus = th.where(cib_bull, bonus + scale, bonus)
+        # Bearish CiB: in UP pullback → enter short (continuation of prior DOWN)
+        cib_bear = is_short_entry & (wave_dir > 0) & cib_pullback
+        bonus = th.where(cib_bear, bonus + scale, bonus)
+
         return th.clamp(bonus, max=scale)  # cap stacking to 1× scale
 
     # ─── Management bonus (vectorized) ─────────────────────────────────────
@@ -1338,7 +1387,12 @@ class NQWyckoffWeisVecEnv:
         thr = self.event_threshold
         spring   = self.tech_factor[self.day, self._col_spring] > thr
         upthrust = self.tech_factor[self.day, self._col_upthrust] > thr
-        setup_present = spring | upthrust  # ~5% of bars (was 37.5% with absorption+stopping)
+        vol_vs_prev = self.tech_factor[self.day, self._col_wave_vol_vs_prev]
+        large_wave = self.tech_factor[self.day, self._col_large_wave]
+        cib_active = ((vol_vs_prev > CIB_MIN_PB_VOL_RATIO)
+                      & (vol_vs_prev < CIB_MAX_PB_VOL_RATIO)
+                      & (large_wave < CIB_MAX_LARGE_WAVE))
+        setup_present = spring | upthrust | cib_active
         hold_on_setup = is_flat & (action == ACTION_HOLD) & setup_present
 
         bonus = th.where(hold_on_setup, bonus - self.idle_penalty, bonus)
