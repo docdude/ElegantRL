@@ -712,6 +712,7 @@ class NQWyckoffWeisVecEnv:
         regime_penalty_scale: float = 0.05,
         idle_penalty: float = 0.05,
         carry_cost: float = 0.0,
+        carry_multiplier: float = 0.0,
         vesting_bars: int = 10,
         pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
@@ -761,7 +762,7 @@ class NQWyckoffWeisVecEnv:
         self.regime_penalty_scale = regime_penalty_scale
         self.idle_penalty = idle_penalty
         self.carry_cost = carry_cost
-        self.carry_multiplier = kwargs.get('carry_multiplier', 0.0)
+        self.carry_multiplier = carry_multiplier
         self.vesting_bars = vesting_bars
         # Dense PnL mode: lower normalization so per-bar PnL ≈ O(1) for PPO
         # and wider clip to preserve reward granularity
