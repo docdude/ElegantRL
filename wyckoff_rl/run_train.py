@@ -99,7 +99,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="discrete_ppo",
                         choices=["discrete_ppo", "ppo", "wyckoff_ppo", "wyckoff_wave_ppo", "sac", "td3"])
     parser.add_argument("--reward", type=str, default=DEFAULT_ENV_PARAMS['reward_mode'],
-                        choices=["dense_pnl", "sparse_exit", "pnl", "log_ret", "sharpe", "sortino"],
+                        choices=["dense_pnl", "sparse_exit", "sparse_shaping", "pnl", "log_ret", "sharpe", "sortino"],
                         help="Reward function")
     parser.add_argument("--no-sign-flip", action="store_true",
                         help="Disable episode direction randomization")
