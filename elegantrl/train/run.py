@@ -30,6 +30,7 @@ def _load_bc_checkpoint(agent, args: Config):
         print(f"| WARNING: bc_checkpoint not found: {bc_path}")
         return
 
+    import copy
     ckpt = th.load(bc_path, map_location=agent.device, weights_only=True)
     actor_sd = ckpt.get('actor_state_dict', ckpt)
     agent.act.load_state_dict(actor_sd, strict=False)
@@ -39,6 +40,16 @@ def _load_bc_checkpoint(agent, args: Config):
         agent.act.state_avg.data = ckpt['state_avg'].to(agent.device)
     if 'state_std' in ckpt:
         agent.act.state_std.data = ckpt['state_std'].to(agent.device)
+
+    # Create frozen BC reference policy for KL anchoring
+    bc_kl_coeff = getattr(args, 'bc_kl_coeff', 0.0)
+    if bc_kl_coeff > 0:
+        agent.bc_ref_act = copy.deepcopy(agent.act)
+        agent.bc_ref_act.eval()
+        for p in agent.bc_ref_act.parameters():
+            p.requires_grad_(False)
+        agent.bc_kl_coeff = bc_kl_coeff
+        print(f"| BC KL anchor enabled: coeff={bc_kl_coeff}")
 
     print(f"| Loaded BC actor from {bc_path} (val_acc={ckpt.get('val_acc', '?')})")
 

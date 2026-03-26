@@ -11,6 +11,7 @@ the proper min(surrogate1, surrogate2) formulation.
 """
 
 import torch as th
+import torch.nn.functional as F
 from elegantrl.agents.AgentPPO import AgentDiscretePPO
 from elegantrl.train import Config
 
@@ -18,7 +19,11 @@ TEN = th.Tensor
 
 
 class AgentDiscreteWyckoffPPO(AgentDiscretePPO):
-    """AgentDiscretePPO with the correct PPO clipped surrogate restored."""
+    """AgentDiscretePPO with the correct PPO clipped surrogate restored.
+
+    Optionally applies a KL divergence penalty against a frozen BC reference
+    policy (set via bc_ref_act / bc_kl_coeff by _load_bc_checkpoint).
+    """
 
     def update_objectives(self, buffer: tuple[TEN, ...], update_t: int) -> tuple[float, float, float]:
         states, actions, unmasks, logprobs, advantages, reward_sums = buffer
@@ -57,6 +62,21 @@ class AgentDiscreteWyckoffPPO(AgentDiscretePPO):
         obj_surrogate = (surrogate * unmask).mean()
         obj_entropy = (entropy * unmask).mean()
         obj_actor_full = obj_surrogate - obj_entropy * self.lambda_entropy
+
+        # ── KL penalty against frozen BC reference policy ────────────
+        bc_ref = getattr(self, 'bc_ref_act', None)
+        bc_kl = getattr(self, 'bc_kl_coeff', 0.0)
+        if bc_ref is not None and bc_kl > 0:
+            with th.no_grad():
+                bc_logits = bc_ref.net(bc_ref.state_norm(state))
+                bc_log_probs = F.log_softmax(bc_logits, dim=-1)
+            cur_logits = self.act.net(self.act.state_norm(state))
+            cur_log_probs = F.log_softmax(cur_logits, dim=-1)
+            # KL(current || BC) — penalise divergence from expert
+            kl_div = (cur_log_probs.exp() * (cur_log_probs - bc_log_probs)).sum(dim=-1)
+            obj_kl = (kl_div * unmask).mean()
+            obj_actor_full = obj_actor_full - bc_kl * obj_kl
+
         self.optimizer_backward(self.act_optimizer, -obj_actor_full)
 
         return obj_critic.item(), obj_surrogate.item(), obj_entropy.item()

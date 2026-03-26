@@ -165,6 +165,8 @@ def parse_args():
     parser.add_argument("--cwd", type=str, default=None)
     parser.add_argument("--bc-checkpoint", type=str, default=None,
                         help="Path to BC pre-trained actor checkpoint (.pt) for warm-start")
+    parser.add_argument("--bc-kl-coeff", type=float, default=0.5,
+                        help="KL divergence penalty coeff anchoring policy to BC prior (0=off)")
 
     return parser.parse_args()
 
@@ -367,6 +369,7 @@ def main():
             random_seed=args.seed,
             continue_train=args.continue_train,
             bc_checkpoint=args.bc_checkpoint,
+            bc_kl_coeff=args.bc_kl_coeff,
         )
         results.append(result)
         print(f"\n  Split {idx} done: {result}")
