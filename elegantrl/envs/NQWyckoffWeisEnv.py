@@ -719,7 +719,7 @@ class NQWyckoffWeisVecEnv:
         bar_range: float = 40.0,
         feature_indices: list[int] | None = None,
         gamma: float = 0.99,            # kept for ElegantRL Config compat
-        reward_mode: str = "dense_pnl", # "dense_pnl" or "sparse_exit"
+        reward_mode: str = "dense_pnl", # "dense_pnl", "sparse_exit", or "sparse_shaping"
         sign_flip: bool = True,          # randomly flip long/short each episode
         log_dir: str = "",
         **kwargs,
@@ -1130,7 +1130,12 @@ class NQWyckoffWeisVecEnv:
 
             mgmt_bonus = self._compute_management_bonus(action)
             regime_penalty = self._compute_regime_mismatch_penalty(action)
-            carry = self.carry_cost * post_size
+            # sparse_shaping: zero carry so shaping signals dominate
+            # between trades; PnL only fires on EXIT (sparse, high-magnitude)
+            if self.reward_mode == 'sparse_shaping':
+                carry = th.zeros_like(exit_pnl)
+            else:
+                carry = self.carry_cost * post_size
 
             reward = (exit_pnl + entry_bonus + mgmt_bonus
                       - penalty - regime_penalty - carry) * self.reward_scale
