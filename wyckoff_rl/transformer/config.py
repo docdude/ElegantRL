@@ -117,7 +117,7 @@ class TransformerConfig:
     n_heads: int = 4                # Attention heads
     n_layers: int = 3               # Transformer layers
     d_ff: int = 128                 # Feed-forward inner dim
-    dropout: float = 0.1            # Dropout rate
+    dropout: float = 0.3            # Dropout rate (higher for small datasets)
 
     # Position features (appended at policy layer, not encoder)
     n_position_features: int = 8    # [side, size, entry_dist, unreal, real, bars_in, mfe, mae]

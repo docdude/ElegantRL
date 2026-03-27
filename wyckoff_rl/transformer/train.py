@@ -58,7 +58,8 @@ class WyckoffSequenceDataset(Dataset):
     and their labels at the last bar of each window.
     """
 
-    def __init__(self, npz_path: str, label_path: str, config: TransformerConfig):
+    def __init__(self, npz_path: str, label_path: str, config: TransformerConfig,
+                 augment: bool = False, noise_std: float = 0.02):
         data = np.load(npz_path, allow_pickle=True)
         tech_ary = data['tech_ary'].astype(np.float32)
 
@@ -67,6 +68,12 @@ class WyckoffSequenceDataset(Dataset):
         self.features = tech_ary[:, fi]  # (n_bars, n_features)
         self.seq_len = config.seq_len
         self.n_bars = len(self.features)
+        self.augment = augment
+        self.noise_std = noise_std
+
+        # Compute per-feature normalization stats (mean/std from full dataset)
+        self.feat_mean = self.features.mean(axis=0, keepdims=True)  # (1, F)
+        self.feat_std = self.features.std(axis=0, keepdims=True) + 1e-8  # (1, F)
 
         # Load labels
         labels = load_labels(label_path)
@@ -84,7 +91,14 @@ class WyckoffSequenceDataset(Dataset):
     def __getitem__(self, idx):
         bar_idx = self.valid_start + idx
         # Window: [bar_idx - seq_len, bar_idx)
-        window = self.features[bar_idx - self.seq_len:bar_idx]  # (seq_len, n_features)
+        window = self.features[bar_idx - self.seq_len:bar_idx].copy()  # (seq_len, n_features)
+
+        # Normalize features
+        window = (window - self.feat_mean) / self.feat_std
+
+        # Training augmentation: additive Gaussian noise
+        if self.augment:
+            window = window + np.random.randn(*window.shape).astype(np.float32) * self.noise_std
 
         return {
             'features': torch.from_numpy(window),
@@ -99,12 +113,16 @@ def pretrain(
     label_path: str | None = None,
     config: TransformerConfig | None = None,
     epochs: int = 50,
-    batch_size: int = 256,
+    batch_size: int = 64,
     lr: float = 1e-3,
     val_split: float = 0.15,
     save_dir: str = "checkpoints/transformer",
     device: str = "cuda",
     parquet_path: str | None = None,
+    label_smoothing: float = 0.1,
+    weight_decay: float = 5e-3,
+    patience: int = 10,
+    noise_std: float = 0.02,
 ):
     """
     Phase 1: Supervised pre-training of encoder + heads.
@@ -135,15 +153,22 @@ def pretrain(
             event_counts = labels['events'][:, 1:].sum(axis=0)
             print(f"  Event counts (excl. none): {event_counts.astype(int).tolist()}")
 
-    # Dataset
-    dataset = WyckoffSequenceDataset(npz_path, label_path, config)
-    n_total = len(dataset)
+    # Dataset — train set gets augmentation, val does not
+    train_full = WyckoffSequenceDataset(npz_path, label_path, config,
+                                        augment=True, noise_std=noise_std)
+    val_full = WyckoffSequenceDataset(npz_path, label_path, config,
+                                      augment=False)
+    # Share normalization stats (val uses train stats)
+    val_full.feat_mean = train_full.feat_mean
+    val_full.feat_std = train_full.feat_std
+
+    n_total = len(train_full)
     n_val = int(n_total * val_split)
     n_train = n_total - n_val
 
     # Time-ordered split (not random — respects temporal structure)
-    train_dataset = torch.utils.data.Subset(dataset, range(n_train))
-    val_dataset = torch.utils.data.Subset(dataset, range(n_train, n_total))
+    train_dataset = torch.utils.data.Subset(train_full, range(n_train))
+    val_dataset = torch.utils.data.Subset(val_full, range(n_train, n_total))
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=2, pin_memory=True, drop_last=True)
@@ -151,8 +176,11 @@ def pretrain(
                             num_workers=2, pin_memory=True)
 
     print(f"Dataset: {n_total} samples (train={n_train}, val={n_val})")
+    print(f"Params/sample ratio: {0:.1f} (will be computed after model build)")
     print(f"Config: seq_len={config.seq_len}, d_model={config.d_model}, "
           f"n_layers={config.n_layers}, n_heads={config.n_heads}")
+    print(f"Regularization: dropout={config.dropout}, weight_decay={weight_decay}, "
+          f"label_smoothing={label_smoothing}, noise_std={noise_std}")
 
     # Build encoder + heads
     encoder = WyckoffTransformerEncoder(config).to(dev)
@@ -166,13 +194,25 @@ def pretrain(
                     for p in m.parameters())
     print(f"Total parameters: {n_params:,}")
 
+    print(f"Params/sample ratio: {n_params / n_train:.1f}")
+
+    # Phase class weights — inverse frequency for imbalanced labels
+    phase_counts = np.bincount(train_full.phase_labels[:n_train + train_full.valid_start],
+                               minlength=N_PHASES).astype(np.float32)
+    phase_counts = np.maximum(phase_counts, 1.0)
+    phase_weights = (1.0 / phase_counts)
+    phase_weights = phase_weights / phase_weights.sum() * N_PHASES  # normalize
+    phase_weights_t = torch.from_numpy(phase_weights).to(dev)
+    print(f"Phase weights: {dict(zip(range(N_PHASES), [f'{w:.2f}' for w in phase_weights]))}")
+
     # Optimizer
     all_params = (list(encoder.parameters()) + list(phase_head.parameters())
                   + list(event_head.parameters()) + list(excursion_head.parameters()))
-    optimizer = torch.optim.AdamW(all_params, lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(all_params, lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_val_loss = float('inf')
+    epochs_no_improve = 0
 
     for epoch in range(epochs):
         # ── Train ──
@@ -190,7 +230,10 @@ def pretrain(
             latent = encoder(feats)              # (B, seq, d_model)
             last_latent = latent[:, -1, :]       # (B, d_model)
 
-            loss_phase = phase_head.loss(last_latent, phase_tgt)
+            loss_phase = F.cross_entropy(
+                phase_head(last_latent), phase_tgt,
+                weight=phase_weights_t, label_smoothing=label_smoothing,
+            )
             loss_event = event_head.loss(last_latent, event_tgt)
             loss_excur = excursion_head.loss(last_latent, excur_tgt)
 
@@ -225,7 +268,10 @@ def pretrain(
                 latent = encoder(feats)
                 last_latent = latent[:, -1, :]
 
-                loss_phase = phase_head.loss(last_latent, phase_tgt)
+                loss_phase = F.cross_entropy(
+                    phase_head(last_latent), phase_tgt,
+                    weight=phase_weights_t, label_smoothing=label_smoothing,
+                )
                 loss_event = event_head.loss(last_latent, event_tgt)
                 loss_excur = excursion_head.loss(last_latent, excur_tgt)
 
@@ -248,9 +294,10 @@ def pretrain(
               f"phase_acc={phase_acc:.3f} | "
               f"lr={scheduler.get_last_lr()[0]:.2e}")
 
-        # Save best
+        # Save best + early stopping
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            epochs_no_improve = 0
             checkpoint = {
                 'encoder': encoder.state_dict(),
                 'phase_head': phase_head.state_dict(),
@@ -260,13 +307,21 @@ def pretrain(
                 'epoch': epoch + 1,
                 'val_loss': avg_val_loss,
                 'phase_acc': phase_acc,
+                'feat_mean': train_full.feat_mean,
+                'feat_std': train_full.feat_std,
             }
             torch.save(checkpoint, os.path.join(save_dir, "pretrained_best.pt"))
             print(f"  → Saved best model (val_loss={avg_val_loss:.4f})")
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(f"  ✘ Early stopping: no improvement for {patience} epochs")
+                break
 
     # Final save
     torch.save(checkpoint, os.path.join(save_dir, "pretrained_final.pt"))
-    print(f"\nPre-training complete. Best val_loss={best_val_loss:.4f}")
+    print(f"\nPre-training complete. Best val_loss={best_val_loss:.4f} "
+          f"(epoch {checkpoint.get('epoch', '?')})")
     return os.path.join(save_dir, "pretrained_best.pt")
 
 
@@ -562,8 +617,16 @@ def main():
 
     # Pre-training args
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--pretrain-lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=5e-3)
+    parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument("--patience", type=int, default=10,
+                        help="Early stopping patience (0=disabled)")
+    parser.add_argument("--noise-std", type=float, default=0.02,
+                        help="Gaussian noise augmentation std")
+    parser.add_argument("--dropout", type=float, default=0.3,
+                        help="Dropout rate (encoder + heads)")
 
     # RL args
     parser.add_argument("--total-steps", type=int, default=500_000)
@@ -592,6 +655,7 @@ def main():
         d_model=args.d_model,
         n_layers=args.n_layers,
         n_heads=args.n_heads,
+        dropout=args.dropout,
     )
 
     pretrained_path = args.pretrained_encoder
@@ -607,6 +671,10 @@ def main():
             save_dir=args.save_dir,
             device=f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu",
             parquet_path=args.parquet_path,
+            label_smoothing=args.label_smoothing,
+            weight_decay=args.weight_decay,
+            patience=args.patience,
+            noise_std=args.noise_std,
         )
 
     if args.phase in ("rl", "both"):
