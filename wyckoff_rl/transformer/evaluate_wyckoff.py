@@ -104,11 +104,16 @@ def load_checkpoint(checkpoint_path: str, config: TransformerConfig, device: tor
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if "actor_state_dict" in ckpt:
         actor.load_state_dict(ckpt["actor_state_dict"])
+    elif "actor" in ckpt:
+        actor.load_state_dict(ckpt["actor"])
     elif "model_state_dict" in ckpt:
         actor.load_state_dict(ckpt["model_state_dict"])
     else:
         actor.load_state_dict(ckpt)
     actor.eval()
+    print(f"  Checkpoint keys: {list(ckpt.keys()) if isinstance(ckpt, dict) else 'raw state_dict'}")
+    if isinstance(ckpt, dict) and "steps" in ckpt:
+        print(f"  Steps: {ckpt['steps']:,} | Episodes: {ckpt.get('episodes','?')} | avg_pnl: ${ckpt.get('avg_pnl', '?')}")
     return actor
 
 
