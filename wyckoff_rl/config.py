@@ -116,8 +116,8 @@ RANDOM_SEED = 42
 GPU_ID = 0
 
 DEFAULT_ERL_PARAMS = {
-    "net_dims": [128, 64],
-    "learning_rate": 1e-4,
+    "net_dims": [256, 128],
+    "learning_rate": 2e-4,
     "batch_size": 512,
     "break_step": 2_000_000,
     "gamma": 0.99,

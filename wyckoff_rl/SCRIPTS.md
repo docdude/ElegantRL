@@ -59,8 +59,8 @@ python -m wyckoff_rl.run_train --model wyckoff_wave_ppo --continuous --split 3 -
 | `--loss-weight` | 2.0 | Asymmetric advantage penalty (1.0=symmetric PPO, 2.0=2x loss penalty) |
 | `--trade-reward-weight` | 0.5 | Trade-close PnL bonus (0.0=bar-only, 0.5=adds concentrated bonus) |
 | `--npz` | config default | Path to Wyckoff NPZ file |
-| `--net-dims` | "128,64" | MLP hidden dims (post-encoder) |
-| `--lr` | 1e-4 | Learning rate |
+| `--net-dims` | "256,128" | MLP hidden dims (post-encoder) |
+| `--lr` | 2e-4 | Learning rate |
 | `--batch-size` | 512 | Batch size |
 | `--break-step` | 2,000,000 | Total training steps |
 | `--n-groups` | 5 | CPCV groups |

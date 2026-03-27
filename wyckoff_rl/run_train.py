@@ -118,7 +118,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
     parser.add_argument("--break-step", type=int,
                         default=DEFAULT_ERL_PARAMS['break_step'])
-    parser.add_argument("--net-dims", type=str, default="128,64")
+    parser.add_argument(
+        "--net-dims",
+        type=str,
+        default=",".join(str(x) for x in DEFAULT_ERL_PARAMS['net_dims'])
+    )
     parser.add_argument("--lr", type=float,
                         default=DEFAULT_ERL_PARAMS['learning_rate'])
     parser.add_argument("--batch-size", type=int,
