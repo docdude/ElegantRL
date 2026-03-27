@@ -61,13 +61,15 @@ class ContractSegment:
 # NQ quarterly front-month windows (volume rollover, 3rd Friday expiry):
 #   Z24 expiry: Dec 20, 2024  |  H25 expiry: Mar 21, 2025
 #   M25 expiry: Jun 20, 2025  |  U25 expiry: Sep 19, 2025
-#   Z25 expiry: Dec 19, 2025
+#   Z25 expiry: Dec 19, 2025 
+
 NQ_SEGMENTS: List[ContractSegment] = [
     ContractSegment("NQZ24-CME.scid", None,         "2024-12-20", "Z24"),
     ContractSegment("NQH25-CME.scid", "2024-12-21", "2025-03-21", "H25"),
     ContractSegment("NQM25-CME.scid", "2025-03-22", "2025-06-20", "M25"),
     ContractSegment("NQU25-CME.scid", "2025-06-21", "2025-09-19", "U25"),
     ContractSegment("NQZ25-CME.scid", "2025-09-20", "2025-12-19", "Z25"),
+
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
