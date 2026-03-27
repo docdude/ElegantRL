@@ -50,7 +50,7 @@ from .adapters import (
 from ..feature_config import ALL_FEATURES
 
 logger = logging.getLogger("wyckoff_trader")
-
+logger.setLevel(logging.DEBUG)
 
 def _build_feature_name_map(feature_indices):
     """Build feature_name → offset map for a given set of selected indices."""
