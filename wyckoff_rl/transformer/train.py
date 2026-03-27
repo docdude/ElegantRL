@@ -111,6 +111,7 @@ class WyckoffSequenceDataset(Dataset):
 def pretrain(
     npz_path: str,
     label_path: str | None = None,
+    pretrained_path: str | None = None,
     config: TransformerConfig | None = None,
     epochs: int = 50,
     batch_size: int = 64,
@@ -187,6 +188,18 @@ def pretrain(
     phase_head = PhaseHead(config).to(dev)
     event_head = EventHead(config).to(dev)
     excursion_head = ExcursionHead(config).to(dev)
+
+    if pretrained_path and os.path.exists(pretrained_path):
+        ckpt = torch.load(pretrained_path, map_location='cpu', weights_only=False)
+        encoder.load_state_dict(ckpt['encoder'])
+        phase_head.load_state_dict(ckpt['phase_head'])
+        event_head.load_state_dict(ckpt['event_head'])
+        excursion_head.load_state_dict(ckpt['excursion_head'])
+        print(
+            f"Loaded pre-trained weights for supervised warm start from "
+            f"{pretrained_path} (epoch={ckpt.get('epoch')}, "
+            f"phase_acc={ckpt.get('phase_acc', 0):.3f})"
+        )
 
     # Count parameters
     n_params = sum(p.numel() for p in encoder.parameters())
@@ -664,6 +677,7 @@ def main():
         pretrained_path = pretrain(
             npz_path=args.npz_path,
             label_path=args.label_path,
+            pretrained_path=args.pretrained_encoder,
             config=config,
             epochs=args.epochs,
             batch_size=args.batch_size,
