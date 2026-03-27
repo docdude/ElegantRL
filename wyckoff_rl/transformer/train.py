@@ -59,27 +59,39 @@ class WyckoffSequenceDataset(Dataset):
     """
 
     def __init__(self, npz_path: str, label_path: str, config: TransformerConfig,
-                 augment: bool = False, noise_std: float = 0.02):
+                 augment: bool = False, noise_std: float = 0.02,
+                 end_idx: int = 0):
         data = np.load(npz_path, allow_pickle=True)
         tech_ary = data['tech_ary'].astype(np.float32)
 
         # Select transformer features
         fi = config.feature_indices or TRANSFORMER_FEATURE_INDICES
-        self.features = tech_ary[:, fi]  # (n_bars, n_features)
+        features_full = tech_ary[:, fi]  # (n_bars, n_features)
+
+        # Apply holdout boundary (0 = use all)
+        if end_idx > 0:
+            features_full = features_full[:end_idx]
+
+        self.features = features_full
         self.seq_len = config.seq_len
         self.n_bars = len(self.features)
         self.augment = augment
         self.noise_std = noise_std
 
-        # Compute per-feature normalization stats (mean/std from full dataset)
+        # Compute per-feature normalization stats (from training data only)
         self.feat_mean = self.features.mean(axis=0, keepdims=True)  # (1, F)
         self.feat_std = self.features.std(axis=0, keepdims=True) + 1e-8  # (1, F)
 
-        # Load labels
+        # Load labels (sliced to match)
         labels = load_labels(label_path)
-        self.phase_labels = labels['phase']        # (n_bars,) int64
-        self.event_labels = labels['events']       # (n_bars, N_EVENTS) float32
-        self.excursion_labels = labels['excursion'] # (n_bars, 2) float32
+        if end_idx > 0:
+            self.phase_labels = labels['phase'][:end_idx]
+            self.event_labels = labels['events'][:end_idx]
+            self.excursion_labels = labels['excursion'][:end_idx]
+        else:
+            self.phase_labels = labels['phase']
+            self.event_labels = labels['events']
+            self.excursion_labels = labels['excursion']
 
         # Valid indices: need seq_len bars of history
         self.valid_start = self.seq_len
@@ -124,6 +136,7 @@ def pretrain(
     weight_decay: float = 5e-3,
     patience: int = 10,
     noise_std: float = 0.02,
+    train_end_bar: int = 0,
 ):
     """
     Phase 1: Supervised pre-training of encoder + heads.
@@ -155,10 +168,16 @@ def pretrain(
             print(f"  Event counts (excl. none): {event_counts.astype(int).tolist()}")
 
     # Dataset — train set gets augmentation, val does not
+    # If train_end_bar is set, both datasets are sliced to exclude the holdout
     train_full = WyckoffSequenceDataset(npz_path, label_path, config,
-                                        augment=True, noise_std=noise_std)
+                                        augment=True, noise_std=noise_std,
+                                        end_idx=train_end_bar)
     val_full = WyckoffSequenceDataset(npz_path, label_path, config,
-                                      augment=False)
+                                      augment=False, end_idx=train_end_bar)
+    if train_end_bar > 0:
+        total_bars = np.load(npz_path, allow_pickle=True)['tech_ary'].shape[0]
+        print(f"Holdout: training on bars 0-{train_end_bar}, "
+              f"holding out {total_bars - train_end_bar} bars for test")
     # Share normalization stats (val uses train stats)
     val_full.feat_mean = train_full.feat_mean
     val_full.feat_std = train_full.feat_std
@@ -378,6 +397,7 @@ def rl_train(
     bar_range: float = 100.0,
     episode_len: int = 512,
     reward_mode: str = "dense_pnl",
+    train_end_bar: int = 0,
     **env_kwargs,
 ):
     """
@@ -398,6 +418,9 @@ def rl_train(
     device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 
     # ── Build environment ────────────────────────────────────────────────
+    env_end_idx = train_end_bar if train_end_bar > 0 else 0
+    if env_end_idx > 0:
+        print(f"RL env: using bars 0-{env_end_idx} (holdout from bar {env_end_idx})")
     env = WyckoffTransformerVecEnv(
         config=config,
         npz_path=npz_path,
@@ -409,6 +432,7 @@ def rl_train(
         tick_value=tick_value,
         bar_range=bar_range,
         reward_mode=reward_mode,
+        end_idx=env_end_idx,
         **env_kwargs,
     )
 
@@ -655,6 +679,11 @@ def main():
     parser.add_argument("--tick-value", type=float, default=1.0)
     parser.add_argument("--bar-range", type=float, default=100.0)
 
+    # Data split
+    parser.add_argument("--train-end-bar", type=int, default=0,
+                        help="Bar index for train/test split (0=use all). "
+                             "Bars 0..N-1 for train+val, N..end for holdout test.")
+
     # Architecture overrides
     parser.add_argument("--seq-len", type=int, default=128)
     parser.add_argument("--d-model", type=int, default=64)
@@ -689,6 +718,7 @@ def main():
             weight_decay=args.weight_decay,
             patience=args.patience,
             noise_std=args.noise_std,
+            train_end_bar=args.train_end_bar,
         )
 
     if args.phase in ("rl", "both"):
@@ -709,6 +739,7 @@ def main():
             bar_range=args.bar_range,
             episode_len=args.episode_len,
             reward_mode=args.reward_mode,
+            train_end_bar=args.train_end_bar,
         )
 
 
