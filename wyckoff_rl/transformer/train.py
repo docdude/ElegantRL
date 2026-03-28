@@ -123,17 +123,17 @@ def pretrain(
     label_path: str | None = None,
     pretrained_path: str | None = None,
     config: TransformerConfig | None = None,
-    epochs: int = 50,
+    epochs: int = 60,
     batch_size: int = 64,
-    lr: float = 3e-4,
+    lr: float = 5e-5,
     val_split: float = 0.15,
     save_dir: str = "checkpoints/transformer",
     device: str = "cuda",
     parquet_path: str | None = None,
     label_smoothing: float = 0.1,
-    weight_decay: float = 0.01,
-    patience: int = 10,
-    noise_std: float = 0.03,
+    weight_decay: float = 0.05,
+    patience: int = 15,
+    noise_std: float = 0.02,
     train_end_bar: int = 0,
     warmup_epochs: int = 5,
 ):
@@ -384,7 +384,7 @@ def rl_train(
     pretrained_path: str | None = None,
     config: TransformerConfig | None = None,
     total_steps: int = 500_000,
-    num_envs: int = 128,
+    num_envs: int = 512,
     horizon_len: int = 256,
     lr_actor: float = 3e-4,
     lr_critic: float = 1e-3,
@@ -685,23 +685,23 @@ def main():
     parser.add_argument("--gpu-id", type=int, default=0)
 
     # Pre-training args
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--pretrain-lr", type=float, default=3e-4)
-    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--pretrain-lr", type=float, default=5e-5)
+    parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--label-smoothing", type=float, default=0.1)
-    parser.add_argument("--patience", type=int, default=10,
+    parser.add_argument("--patience", type=int, default=15,
                         help="Early stopping patience (0=disabled)")
-    parser.add_argument("--noise-std", type=float, default=0.03,
+    parser.add_argument("--noise-std", type=float, default=0.02,
                         help="Gaussian noise augmentation std")
-    parser.add_argument("--dropout", type=float, default=0.4,
+    parser.add_argument("--dropout", type=float, default=0.3,
                         help="Dropout rate (encoder + heads)")
     parser.add_argument("--warmup-epochs", type=int, default=5,
                         help="LR linear warmup epochs")
 
     # RL args
     parser.add_argument("--total-steps", type=int, default=500_000)
-    parser.add_argument("--num-envs", type=int, default=128)
+    parser.add_argument("--num-envs", type=int, default=512)
     parser.add_argument("--horizon-len", type=int, default=256)
     parser.add_argument("--rl-lr", type=float, default=3e-4)
     parser.add_argument("--episode-len", type=int, default=512)
@@ -719,8 +719,8 @@ def main():
                              "Bars 0..N-1 for train+val, N..end for holdout test.")
 
     # Architecture overrides
-    parser.add_argument("--seq-len", type=int, default=128)
-    parser.add_argument("--d-model", type=int, default=48)
+    parser.add_argument("--seq-len", type=int, default=64)
+    parser.add_argument("--d-model", type=int, default=32)
     parser.add_argument("--n-layers", type=int, default=2)
     parser.add_argument("--n-heads", type=int, default=4)
 

@@ -87,15 +87,15 @@ N_TRANSFORMER_FEATURES = len(TRANSFORMER_FEATURE_INDICES)  # 29
 @dataclass
 class TransformerConfig:
     # Sequence
-    seq_len: int = 128              # Context window (bars)
+    seq_len: int = 64               # Context window (bars)
     n_bar_features: int = N_TRANSFORMER_FEATURES  # Per-bar input dim
 
     # Encoder
-    d_model: int = 48               # Embedding dimension (smaller for small datasets)
+    d_model: int = 32               # Embedding dimension (smaller for small datasets)
     n_heads: int = 4                # Attention heads
     n_layers: int = 2               # Transformer layers (fewer = less overfit risk)
-    d_ff: int = 96                  # Feed-forward inner dim
-    dropout: float = 0.4            # Dropout rate (aggressive for small datasets)
+    d_ff: int = 64                  # Feed-forward inner dim
+    dropout: float = 0.3            # Dropout rate
 
     # Position features (appended at policy layer, not encoder)
     n_position_features: int = 8    # [side, size, entry_dist, unreal, real, bars_in, mfe, mae]
