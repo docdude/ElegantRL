@@ -383,9 +383,9 @@ def rl_train(
     npz_path: str,
     pretrained_path: str | None = None,
     config: TransformerConfig | None = None,
-    total_steps: int = 10_000_000,
+    total_steps: int = 50_000_000,
     num_envs: int = 512,
-    horizon_len: int = 512,
+    horizon_len: int = 128,
     lr_actor: float = 3e-4,
     lr_critic: float = 1e-3,
     gamma: float = 0.99,
@@ -633,7 +633,7 @@ def rl_train(
                 critic_optimizer.step()
 
         # ── Logging ──────────────────────────────────────────────────
-        if (update + 1) % 5 == 0 or update == 0:
+        if (update + 1) % 1 == 0 or update == 0:
             avg_pnl = episode_pnl_sum / max(episode_count, 1)
             print(f"Update {update+1:4d}/{n_updates} | "
                   f"steps={steps_done:,} | "
@@ -644,7 +644,7 @@ def rl_train(
                   f"entropy={-entropy_loss.item():.4f}")
 
         # ── Save checkpoint ──────────────────────────────────────────
-        if (update + 1) % 50 == 0:
+        if (update + 1) % 25 == 0:
             ckpt_path = os.path.join(save_dir, f"rl_step{steps_done}.pt")
             torch.save({
                 'actor': actor.state_dict(),
@@ -700,9 +700,9 @@ def main():
                         help="LR linear warmup epochs")
 
     # RL args
-    parser.add_argument("--total-steps", type=int, default=10_000_000)
+    parser.add_argument("--total-steps", type=int, default=50_000_000)
     parser.add_argument("--num-envs", type=int, default=512)
-    parser.add_argument("--horizon-len", type=int, default=512)
+    parser.add_argument("--horizon-len", type=int, default=128)
     parser.add_argument("--rl-lr", type=float, default=3e-4)
     parser.add_argument("--episode-len", type=int, default=512)
     parser.add_argument("--reward-mode", default="dense_pnl")
