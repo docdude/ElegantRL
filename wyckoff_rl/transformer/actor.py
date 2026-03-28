@@ -169,13 +169,13 @@ class ActorDiscreteTransformer(nn.Module):
 
         Returns dict of named losses (only for provided targets).
         """
-        _, _, full_latent = self._encode(state)
+        latent, _, _ = self._encode(state)
         losses = {}
 
         if phase_targets is not None:
-            losses["phase"] = self.phase_head.loss(full_latent, phase_targets)
+            losses["phase"] = self.phase_head.loss(latent, phase_targets)
         if event_targets is not None:
-            losses["event"] = self.event_head.loss(full_latent, event_targets)
+            losses["event"] = self.event_head.loss(latent, event_targets)
 
         return losses
 

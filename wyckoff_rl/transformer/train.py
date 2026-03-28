@@ -757,6 +757,12 @@ def main():
         )
 
     if args.phase in ("rl", "both"):
+        # Auto-discover pretrained checkpoint if not explicitly provided
+        if pretrained_path is None:
+            auto_path = os.path.join(args.save_dir, "best_pretrained.pt")
+            if os.path.exists(auto_path):
+                pretrained_path = auto_path
+                print(f"Auto-discovered pretrained checkpoint: {auto_path}")
         rl_train(
             npz_path=args.npz_path,
             pretrained_path=pretrained_path,
