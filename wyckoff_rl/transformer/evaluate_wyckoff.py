@@ -548,6 +548,7 @@ def main():
     parser.add_argument("--n-layers", type=int, default=2)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--d-ff", type=int, default=None, help="Feed-forward dim (default: from checkpoint or d_model*4)")
     parser.add_argument("--bar-range", type=float, default=100.0)
     parser.add_argument("--tick-value", type=float, default=20.0)
     parser.add_argument("--tick-size", type=float, default=1.0)
@@ -562,16 +563,27 @@ def main():
         f"cuda:{args.gpu_id}" if (torch.cuda.is_available() and args.gpu_id >= 0) else "cpu"
     )
 
-    config = TransformerConfig(
-        seq_len=args.seq_len,
-        d_model=args.d_model,
-        n_heads=args.n_heads,
-        n_layers=args.n_layers,
-        dropout=args.dropout,
-        d_ff=args.d_model * 4,
-    )
-
+    # Try to extract config from checkpoint first
     print(f"Loading checkpoint: {args.checkpoint}")
+    ckpt_peek = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    saved_config = ckpt_peek.get('config') if isinstance(ckpt_peek, dict) else None
+    del ckpt_peek
+
+    if saved_config is not None and isinstance(saved_config, TransformerConfig):
+        config = saved_config
+        print(f"  Using config from checkpoint: d_model={config.d_model}, d_ff={config.d_ff}, "
+              f"n_layers={config.n_layers}, n_heads={config.n_heads}")
+    else:
+        d_ff = args.d_ff if args.d_ff is not None else args.d_model * 4
+        config = TransformerConfig(
+            seq_len=args.seq_len,
+            d_model=args.d_model,
+            n_heads=args.n_heads,
+            n_layers=args.n_layers,
+            dropout=args.dropout,
+            d_ff=d_ff,
+        )
+
     actor = load_checkpoint(args.checkpoint, config, device)
     param_count = sum(p.numel() for p in actor.parameters())
     print(f"Actor params: {param_count:,}")
