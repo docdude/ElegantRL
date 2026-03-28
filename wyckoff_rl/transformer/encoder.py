@@ -14,7 +14,7 @@ Architecture:
 import math
 import torch
 import torch.nn as nn
-from .config import TransformerConfig
+from .config_v2 import TransformerConfig
 
 
 class WyckoffTransformerEncoder(nn.Module):

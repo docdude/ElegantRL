@@ -16,7 +16,7 @@ import os
 import numpy as np
 import torch as th
 
-from .config import TransformerConfig, TRANSFORMER_FEATURE_INDICES
+from .config_v2 import TransformerConfig, TRANSFORMER_FEATURE_INDICES
 
 # Action constants (same as NQWyckoffWeisEnv)
 ACTION_HOLD = 0
