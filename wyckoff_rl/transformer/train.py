@@ -391,7 +391,8 @@ def rl_train(
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     clip_ratio: float = 0.2,
-    entropy_coeff: float = 0.01,
+    entropy_coeff: float = 0.05,
+    target_entropy: float = 0.4,
     aux_loss_coeff: float = 0.1,
     encoder_lr_scale: float = 0.1,
     save_dir: str = "checkpoints/transformer_rl",
@@ -600,7 +601,13 @@ def rl_train(
                 policy_loss = -torch.min(surr1, surr2).mean()
                 entropy_loss = -entropy.mean()
 
-                actor_loss = policy_loss + entropy_coeff * entropy_loss
+                # Adaptive entropy: boost coefficient if entropy drops below target
+                cur_entropy = -entropy_loss.item()
+                if cur_entropy < target_entropy:
+                    ent_coeff = entropy_coeff * (1.0 + 3.0 * (target_entropy - cur_entropy) / target_entropy)
+                else:
+                    ent_coeff = entropy_coeff
+                actor_loss = policy_loss + ent_coeff * entropy_loss
 
                 # Auxiliary losses from supervised heads
                 if aux_labels is not None:
@@ -641,7 +648,8 @@ def rl_train(
                   f"avg_pnl=${avg_pnl:.2f} | "
                   f"policy_loss={policy_loss.item():.4f} | "
                   f"value_loss={critic_loss.item():.4f} | "
-                  f"entropy={-entropy_loss.item():.4f}")
+                  f"entropy={-entropy_loss.item():.4f} | "
+                  f"ent_c={ent_coeff:.4f}")
 
         # ── Save checkpoint ──────────────────────────────────────────
         if (update + 1) % 25 == 0:
@@ -704,6 +712,7 @@ def main():
     parser.add_argument("--num-envs", type=int, default=512)
     parser.add_argument("--horizon-len", type=int, default=128)
     parser.add_argument("--rl-lr", type=float, default=3e-4)
+    parser.add_argument("--entropy-coeff", type=float, default=0.05)
     parser.add_argument("--episode-len", type=int, default=512)
     parser.add_argument("--reward-mode", default="dense_pnl")
 
@@ -771,6 +780,7 @@ def main():
             num_envs=args.num_envs,
             horizon_len=args.horizon_len,
             lr_actor=args.rl_lr,
+            entropy_coeff=args.entropy_coeff,
             save_dir=os.path.join(args.save_dir, "rl"),
             gpu_id=args.gpu_id,
             label_path=args.label_path,
