@@ -111,15 +111,22 @@ class EventHead(nn.Module):
         return (torch.sigmoid(self.forward(latent)) > threshold).float()
 
     def loss(self, latent: torch.Tensor, targets: torch.Tensor,
-             pos_weight: torch.Tensor | None = None) -> torch.Tensor:
+             pos_weight: torch.Tensor | None = None,
+             focal_gamma: float = 2.0) -> torch.Tensor:
         """
-        Binary cross-entropy loss for multi-label event detection.
+        Focal loss for multi-label event detection.
+
+        Focal loss down-weights easy (well-classified) examples and focuses
+        on hard examples, which is crucial for rare events.
+
+        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
 
         Parameters
         ----------
         latent : (batch, d_model) or (batch, seq_len, d_model)
-        targets : (batch, n_events) or (batch, seq_len, n_events) — binary labels
+        targets : (batch, n_events) or (batch, seq_len, n_events) — binary/soft labels
         pos_weight : optional positive class weights (events are rare)
+        focal_gamma : focal loss focusing parameter (0 = standard BCE)
 
         Returns
         -------
@@ -129,9 +136,16 @@ class EventHead(nn.Module):
         if logits.dim() == 3:
             logits = logits.reshape(-1, logits.size(-1))
             targets = targets.reshape(-1, targets.size(-1))
-        return F.binary_cross_entropy_with_logits(
-            logits, targets.float(), pos_weight=pos_weight
+
+        # Standard BCE with logits
+        bce = F.binary_cross_entropy_with_logits(
+            logits, targets.float(), pos_weight=pos_weight, reduction='none'
         )
+        # Focal modulation: (1 - p_t)^gamma
+        probs = torch.sigmoid(logits)
+        p_t = probs * targets.float() + (1 - probs) * (1 - targets.float())
+        focal_weight = (1 - p_t) ** focal_gamma
+        return (focal_weight * bce).mean()
 
 
 class ExcursionHead(nn.Module):

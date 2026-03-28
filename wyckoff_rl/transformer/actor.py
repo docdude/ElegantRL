@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from .encoder import WyckoffTransformerEncoder
-from .heads import PhaseHead, EventHead, ExcursionHead
+from .heads import PhaseHead, EventHead
 from .config import TransformerConfig
 
 
@@ -45,7 +45,6 @@ class ActorDiscreteTransformer(nn.Module):
         # Supervised heads (Layer 2) — auxiliary losses during training
         self.phase_head = PhaseHead(config)
         self.event_head = EventHead(config)
-        self.excursion_head = ExcursionHead(config)
 
         # Policy head (Layer 3)
         policy_input_dim = config.d_model + config.n_position_features
@@ -163,7 +162,6 @@ class ActorDiscreteTransformer(nn.Module):
         state: torch.Tensor,
         phase_targets: torch.Tensor | None = None,
         event_targets: torch.Tensor | None = None,
-        excursion_targets: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Compute auxiliary supervised losses from the classification heads.
@@ -178,8 +176,6 @@ class ActorDiscreteTransformer(nn.Module):
             losses["phase"] = self.phase_head.loss(full_latent, phase_targets)
         if event_targets is not None:
             losses["event"] = self.event_head.loss(full_latent, event_targets)
-        if excursion_targets is not None:
-            losses["excursion"] = self.excursion_head.loss(full_latent, excursion_targets)
 
         return losses
 

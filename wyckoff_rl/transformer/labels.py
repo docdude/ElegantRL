@@ -1,19 +1,18 @@
 """
 Structural labeling pipeline for supervised pre-training of transformer heads.
 
-Derives phase and event labels from RAW price/volume structure, NOT from
+Derives regime and event labels from RAW price/volume structure, NOT from
 pre-computed feature scores. This avoids the circular problem where the
 transformer would just learn to replicate the feature pipeline's output.
+
+v1 simplified ontology:
+  - regime (n_bars,) int64: 0=balance, 1=uptrend, 2=downtrend
+  - events (n_bars, 4) float32: spring_like, upthrust_like, absorption_like, exhaustion_like
 
 Data sources:
   - Parquet file: raw OHLCV + delta + CVD per range bar
   - Wave segmentation: _segment_waves_nolag() on raw bars
-  - Close prices: forward excursion
-
-Labels produced:
-  - phase (n_bars,) int64: Wyckoff phase from wave geometry
-  - events (n_bars, N_EVENTS) float32: structural event detection
-  - excursion (n_bars, 2) float32: forward favorable/adverse move
+  - Close prices: forward excursion (optional, not in v1)
 
 Usage:
     labels = generate_structural_labels(
@@ -23,7 +22,7 @@ Usage:
 
 import numpy as np
 import pandas as pd
-from .config import N_PHASES, N_EVENTS
+from .config import N_REGIMES, N_EVENTS
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -40,7 +39,11 @@ def generate_structural_labels(
     spring_reclaim_bars: int = 5,
 ) -> dict:
     """
-    Generate structural Wyckoff labels from raw OHLCV data.
+    Generate simplified structural labels (v1) from raw OHLCV data.
+
+    v1 ontology:
+      - regime (n_bars,) int64: 0=balance, 1=uptrend, 2=downtrend
+      - events (n_bars, 4) float32: [spring_like, upthrust_like, absorption_like, exhaustion_like]
 
     Parameters
     ----------
@@ -48,8 +51,6 @@ def generate_structural_labels(
         Path to parquet with raw OHLCV + delta + CVD bars.
     npz_path : str, optional
         If provided, verifies alignment (same close prices).
-    excursion_horizon : int
-        Forward bars for favorable/adverse excursion.
     range_lookback : int
         Bars to look back for range detection.
     range_min_tests : int
@@ -61,7 +62,7 @@ def generate_structural_labels(
 
     Returns
     -------
-    dict with 'phase', 'events', 'excursion'
+    dict with 'phase' (regime labels), 'events'
     """
     df = pd.read_parquet(parquet_path)
     n = len(df)
@@ -84,23 +85,19 @@ def generate_structural_labels(
     # Structural range detection
     ranges = _detect_ranges(df, lookback=range_lookback, min_tests=range_min_tests)
 
-    # Phase labels from wave geometry
-    phase_labels = _label_phases_structural(df, waves, ranges)
+    # Regime labels (3-class: balance/uptrend/downtrend)
+    regime_labels = _label_regime(df, waves, ranges)
 
-    # Event labels from price structure
-    event_labels = _label_events_structural(
-        df, waves, lib_df, ranges,
+    # Event labels (4 binary channels)
+    event_labels = _label_events_v1(
+        df, waves, ranges,
         climax_vol_sigma=climax_vol_sigma,
         spring_reclaim_bars=spring_reclaim_bars,
     )
 
-    # Forward excursion (this stays — it's from actual future prices)
-    excursion = _compute_excursion(df['close'].values, excursion_horizon)
-
     return {
-        'phase': phase_labels,
+        'phase': regime_labels,   # key kept as 'phase' for checkpoint compat
         'events': event_labels,
-        'excursion': excursion,
     }
 
 
@@ -183,8 +180,8 @@ def _simple_zigzag_waves(df: pd.DataFrame, pct_reversal: float = 0.005) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 def _detect_ranges(
-    df: pd.DataFrame, lookback: int = 60, min_tests: int = 3,
-    touch_pct: float = 0.10,
+    df: pd.DataFrame, lookback: int = 60, min_tests: int = 4,
+    touch_pct: float = 0.08,
 ) -> np.ndarray:
     """
     Detect consolidation ranges from raw price action.
@@ -218,7 +215,14 @@ def _detect_ranges(
 
         if range_width < 1e-6:
             continue
-        if range_width / close[i] > 0.04:
+        # Reject ranges wider than 2% of price (real consolidation is tight)
+        if range_width / close[i] > 0.02:
+            continue
+
+        # Reject if price has moved directionally across most of the range
+        # (trending through a window is not consolidation)
+        net_move = abs(close[i] - close[max(0, i - lookback)])
+        if net_move > range_width * 0.6:
             continue
 
         tol = range_width * touch_pct
@@ -237,7 +241,7 @@ def _detect_ranges(
         s_clusters = _count_clusters(s_mask)
         r_clusters = _count_clusters(r_mask)
 
-        if s_clusters >= 2 and r_clusters >= 2:
+        if s_clusters >= 3 and r_clusters >= 3:
             ranges[i] = [range_low, range_high, support_tests, resistance_tests]
 
     return ranges
@@ -252,26 +256,22 @@ def _count_clusters(mask: np.ndarray) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Phase Labels (from wave geometry, NOT from feature scores)
+# Regime Labels (v1: balance / uptrend / downtrend)
 # ═══════════════════════════════════════════════════════════════════════
 
-def _label_phases_structural(
+def _label_regime(
     df: pd.DataFrame, waves: dict, ranges: np.ndarray,
     trend_window: int = 5,
 ) -> np.ndarray:
     """
-    Label Wyckoff phases from swing high / swing low progression.
+    Classify market regime from swing progression.
 
-    Uses separate swing high and swing low sequences (not interleaved).
-    - Markup (3): Recent swing highs mostly HH AND swing lows mostly HL.
-    - Markdown (6): Recent swing highs mostly LH AND swing lows mostly LL.
-    - Accumulation (1): Narrowing swings, HL bias, after decline.
-    - Distribution (4): Narrowing swings, LH bias, after advance.
-    - Re-accumulation (2): Range within uptrend context.
-    - Re-distribution (5): Range within downtrend context.
+    0 = balance  (range-bound, unclear, accumulation, distribution)
+    1 = uptrend  (HH + HL dominant)
+    2 = downtrend (LH + LL dominant)
     """
     n = len(df)
-    labels = np.zeros(n, dtype=np.int64)
+    labels = np.zeros(n, dtype=np.int64)  # default: balance
 
     wave_id = waves['wave_id']
     wave_dir = waves['wave_dir']
@@ -284,8 +284,8 @@ def _label_phases_structural(
     if len(sh_prices) < trend_window or len(sl_prices) < trend_window:
         return labels
 
-    sh_idx = 0  # pointer into swing highs
-    sl_idx = 0  # pointer into swing lows
+    sh_idx = 0
+    sl_idx = 0
 
     for i in range(n):
         while sh_idx < len(sh_bars) and sh_bars[sh_idx] <= i:
@@ -305,31 +305,15 @@ def _label_phases_structural(
         hl = sum(1 for j in range(1, len(rl)) if rl[j] > rl[j - 1])
         ll = sum(1 for j in range(1, len(rl)) if rl[j] < rl[j - 1])
 
-        has_range = ranges[i, 2] > 0
-
-        # Markup: strongly trending HH + HL (>= 75%)
+        # Uptrend: strongly trending HH + HL (>= 75%)
         if hh >= tw * 0.75 and hl >= tw * 0.75:
-            labels[i] = 3
-
-        # Markdown: strongly trending LH + LL (>= 75%)
-        elif ll >= tw * 0.75 and lh >= tw * 0.75:
-            labels[i] = 6
-
-        # Accumulation: higher-low bias (bottom-building, not yet markup)
-        elif hl > ll and hh < tw * 0.75:
             labels[i] = 1
 
-        # Distribution: lower-high bias (top-building, not yet markdown)
-        elif lh > hh and ll < tw * 0.75:
-            labels[i] = 4
-
-        # Re-accumulation: range within uptrend (weaker trend + range)
-        elif has_range and hl >= ll:
+        # Downtrend: strongly trending LH + LL (>= 75%)
+        elif ll >= tw * 0.75 and lh >= tw * 0.75:
             labels[i] = 2
 
-        # Re-distribution: range within downtrend
-        elif has_range and lh >= hh:
-            labels[i] = 5
+        # Everything else stays 0 (balance)
 
     return labels
 
@@ -339,12 +323,10 @@ def _extract_pivots(wave_id, wave_dir, wave_high, wave_low):
     Extract alternating swing highs and swing lows from wave segments.
 
     Filters out trivial waves (< 3 bars) to avoid noisy zigzag pivots.
-    Returns separate swing high and swing low sequences with their bar indices,
-    suitable for comparing HH/HL/LH/LL patterns.
+    Returns separate swing high and swing low sequences with their bar indices.
     """
     n = len(wave_id)
-    # Collect raw wave segments
-    raw_waves = []  # (end_bar, is_up, wave_high, wave_low, wave_len)
+    raw_waves = []
     seg_start = 0
     prev_wave = wave_id[0]
     for i in range(1, n):
@@ -357,7 +339,6 @@ def _extract_pivots(wave_id, wave_dir, wave_high, wave_low):
     raw_waves.append((n - 1, wave_dir[n - 1] > 0,
                       wave_high[n - 1], wave_low[n - 1], n - seg_start))
 
-    # Filter: merge trivial waves (< 3 bars) into neighbors
     min_wave_bars = 3
     significant = []
     for w in raw_waves:
@@ -368,17 +349,13 @@ def _extract_pivots(wave_id, wave_dir, wave_high, wave_low):
             significant[-1] = (w[0], prev[1], max(prev[2], w[2]),
                                min(prev[3], w[3]), prev[4] + w[4])
 
-    # Extract swing highs (from up-waves) and swing lows (from down-waves)
-    swing_highs = []     # (bar_idx, price)
-    swing_lows = []      # (bar_idx, price)
-    all_pivots_bars = [] # combined chronological bar indices
-
+    swing_highs = []
+    swing_lows = []
     for bar_idx, is_up, wh, wl, wlen in significant:
         if is_up:
             swing_highs.append((bar_idx, wh))
         else:
             swing_lows.append((bar_idx, wl))
-        all_pivots_bars.append(bar_idx)
 
     sh_bars = np.array([s[0] for s in swing_highs], dtype=np.int64) if swing_highs else np.array([], dtype=np.int64)
     sh_prices = np.array([s[1] for s in swing_highs]) if swing_highs else np.array([])
@@ -389,30 +366,22 @@ def _extract_pivots(wave_id, wave_dir, wave_high, wave_low):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Event Labels (from price structure, NOT from feature scores)
+# Event Labels v1 (4 channels: spring_like, upthrust_like, absorption_like, exhaustion_like)
 # ═══════════════════════════════════════════════════════════════════════
 
-def _label_events_structural(
-    df: pd.DataFrame, waves: dict, lib_df,
+def _label_events_v1(
+    df: pd.DataFrame, waves: dict,
     ranges: np.ndarray,
     climax_vol_sigma: float = 2.0,
     spring_reclaim_bars: int = 5,
 ) -> np.ndarray:
     """
-    Detect Wyckoff events from raw price/volume structure.
+    Detect simplified Wyckoff events from raw price/volume structure.
 
-    Spring (1):  Close breaks below range support, reclaims within N bars.
-    Upthrust (2):  Close breaks above range resistance, falls back.
-    Selling Climax (3):  Volume spike + wide down bar + reversal.
-    Buying Climax (4):  Volume spike + wide up bar + reversal.
-    Test (5):  Return to S/R on volume < 60% of recent avg.
-    SOS (6):  Up-wave with expanding volume vs prior up-waves.
-    SOW (7):  Down-wave with expanding volume vs prior down-waves.
-    No Demand (8):  Up-wave with declining volume.
-    No Supply (9):  Down-wave with declining volume.
-    Effort > Result (10):  High volume + small displacement.
-    LPS (11):  Spring + subsequent test near support within 30 bars.
-    LPSY (12):  Upthrust + subsequent test near resistance within 30 bars.
+    Channel 0 (spring_like): Break below support + reclaim (spring, LPS, test of support)
+    Channel 1 (upthrust_like): Break above resistance + fall back (UT, LPSY, test of resistance)
+    Channel 2 (absorption_like): High effort, little result — effort > result, no demand/supply
+    Channel 3 (exhaustion_like): Climax volume + reversal — SC/BC terminal moves
     """
     n = len(df)
     labels = np.zeros((n, N_EVENTS), dtype=np.float32)
@@ -427,13 +396,14 @@ def _label_events_structural(
     wave_id = waves['wave_id']
     wave_vol = waves['wave_vol']
 
-    # Rolling volume stats for climax detection
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(20, min_periods=5).mean().values
     vol_std20 = vol_series.rolling(20, min_periods=5).std().values
 
-    # For range bars: use duration as "bar width" proxy instead of displacement
-    # (range bar displacement is always ~range_size by definition)
+    spread_all = high - low
+    spread_ma20 = pd.Series(spread_all).rolling(20, min_periods=5).mean().values
+
+    # Duration stats for range bars (exhaustion = fast bar completion)
     has_duration = 'duration_seconds' in df.columns
     if has_duration:
         duration = df['duration_seconds'].values.astype(np.float64)
@@ -442,17 +412,15 @@ def _label_events_structural(
         duration = None
         dur_ma20 = None
 
-    # Track completed wave volumes
     completed_up_vols = []
     completed_down_vols = []
     prev_wave_id = -1
 
-    # Track event locations for LPS/LPSY derivation
     spring_bars = []
     upthrust_bars = []
 
     for i in range(1, n):
-        # -- Wave completion tracking --
+        # Wave completion tracking
         if wave_id[i] != prev_wave_id and prev_wave_id >= 0:
             if wave_dir[i - 1] > 0:
                 completed_up_vols.append(wave_vol[i - 1])
@@ -464,159 +432,100 @@ def _label_events_structural(
         range_high = ranges[i, 1]
         has_range = ranges[i, 2] > 0
 
-        # -- Spring: break below support + reclaim --
+        # ── Channel 0: spring_like ──
+        # Spring: break below support + reclaim (same bar)
         if has_range and range_low > 0:
             if low[i] < range_low and close[i] > range_low:
-                labels[i, 1] = 1.0
+                labels[i, 0] = 1.0
                 spring_bars.append(i)
             elif i >= spring_reclaim_bars:
+                # Reclaim within a few bars (weaker signal)
                 for j in range(1, min(spring_reclaim_bars + 1, i)):
                     if low[i - j] < range_low and close[i] > range_low:
-                        labels[i, 1] = 0.8
+                        labels[i, 0] = 0.8
                         if not spring_bars or spring_bars[-1] != i:
                             spring_bars.append(i)
                         break
 
-        # -- Upthrust: break above resistance + fall back --
+        # LPS: spring within 15 bars + test near support on low volume
+        # (tighter window — real LPS happens soon after spring)
+        if has_range and spring_bars:
+            if 0 < (i - spring_bars[-1]) <= 15:
+                rng_w = range_high - range_low
+                if (rng_w > 0 and abs(low[i] - range_low) < rng_w * 0.10
+                        and vol_ma20[i] > 0
+                        and volume[i] < vol_ma20[i] * 0.5):
+                    labels[i, 0] = max(labels[i, 0], 0.7)
+
+        # ── Channel 1: upthrust_like ──
+        # Upthrust: break above resistance + fall back (same bar)
         if has_range and range_high > 0:
             if high[i] > range_high and close[i] < range_high:
-                labels[i, 2] = 1.0
+                labels[i, 1] = 1.0
                 upthrust_bars.append(i)
             elif i >= spring_reclaim_bars:
+                # Fail back within a few bars (weaker signal)
                 for j in range(1, min(spring_reclaim_bars + 1, i)):
                     if high[i - j] > range_high and close[i] < range_high:
-                        labels[i, 2] = 0.8
+                        labels[i, 1] = 0.8
                         if not upthrust_bars or upthrust_bars[-1] != i:
                             upthrust_bars.append(i)
                         break
 
-        # -- Selling Climax: volume spike + fast bar (range bar) + reversal --
-        if (vol_ma20[i] > 0 and vol_std20[i] > 0
-                and volume[i] > vol_ma20[i] + climax_vol_sigma * vol_std20[i]
-                and close[i] < open_[i]):
-            # For range bars: "fast" = short duration (completed quickly)
-            fast_bar = (duration is not None and dur_ma20[i] > 0
-                        and duration[i] < dur_ma20[i] * 0.5)
-            # Reversal: next bar closes higher OR strong rejection wick
-            reversal = (i < n - 1 and close[i + 1] > close[i])
-            if fast_bar or reversal:
-                labels[i, 3] = 1.0
-
-        # -- Buying Climax: volume spike + fast bar (range bar) + reversal --
-        if (vol_ma20[i] > 0 and vol_std20[i] > 0
-                and volume[i] > vol_ma20[i] + climax_vol_sigma * vol_std20[i]
-                and close[i] > open_[i]):
-            fast_bar = (duration is not None and dur_ma20[i] > 0
-                        and duration[i] < dur_ma20[i] * 0.5)
-            reversal = (i < n - 1 and close[i + 1] < close[i])
-            if fast_bar or reversal:
-                labels[i, 4] = 1.0
-
-        # -- Test: return to S/R on low volume --
-        if has_range and vol_ma20[i] > 0:
-            rng_w = range_high - range_low
-            near_support = abs(low[i] - range_low) < rng_w * 0.15
-            near_resist = abs(high[i] - range_high) < rng_w * 0.15
-            low_vol = volume[i] < vol_ma20[i] * 0.6
-            if (near_support or near_resist) and low_vol:
-                labels[i, 5] = 1.0
-
-        # -- SOS: up-wave with expanding volume --
-        if len(completed_up_vols) >= 2 and wave_dir[i] > 0:
-            ref = np.mean(completed_up_vols[-4:])
-            if wave_vol[i] > ref * 1.3:
-                labels[i, 6] = 1.0
-
-        # -- SOW: down-wave with expanding volume --
-        if len(completed_down_vols) >= 2 and wave_dir[i] < 0:
-            ref = np.mean(completed_down_vols[-4:])
-            if wave_vol[i] > ref * 1.3:
-                labels[i, 7] = 1.0
-
-        # -- No Demand: up-wave with declining volume --
-        if len(completed_up_vols) >= 2 and wave_dir[i] > 0:
-            ref = np.mean(completed_up_vols[-4:])
-            if wave_vol[i] < ref * 0.5:
-                labels[i, 8] = 1.0
-
-        # -- No Supply: down-wave with declining volume --
-        if len(completed_down_vols) >= 2 and wave_dir[i] < 0:
-            ref = np.mean(completed_down_vols[-4:])
-            if wave_vol[i] < ref * 0.5:
-                labels[i, 9] = 1.0
-
-        # -- Effort > Result: high volume + slow completion (range bars) --
-        if vol_ma20[i] > 0:
-            high_effort = volume[i] > vol_ma20[i] * 1.3
-            if duration is not None and dur_ma20[i] > 0:
-                # Range bar: lots of volume but took a long time (indecision)
-                slow_result = duration[i] > dur_ma20[i] * 1.5
-            else:
-                slow_result = False
-            if high_effort and slow_result:
-                labels[i, 10] = 1.0
-
-        # -- LPS: spring within 30 bars + test near support --
-        if has_range and spring_bars:
-            if 0 < (i - spring_bars[-1]) <= 30:
-                rng_w = range_high - range_low
-                if (abs(low[i] - range_low) < rng_w * 0.2
-                        and vol_ma20[i] > 0
-                        and volume[i] < vol_ma20[i] * 0.6):
-                    labels[i, 11] = 1.0
-
-        # -- LPSY: upthrust within 30 bars + test near resistance --
+        # LPSY: upthrust within 15 bars + test near resistance on low volume
         if has_range and upthrust_bars:
-            if 0 < (i - upthrust_bars[-1]) <= 30:
+            if 0 < (i - upthrust_bars[-1]) <= 15:
                 rng_w = range_high - range_low
-                if (abs(high[i] - range_high) < rng_w * 0.2
+                if (rng_w > 0 and abs(high[i] - range_high) < rng_w * 0.10
                         and vol_ma20[i] > 0
-                        and volume[i] < vol_ma20[i] * 0.6):
-                    labels[i, 12] = 1.0
+                        and volume[i] < vol_ma20[i] * 0.5):
+                    labels[i, 1] = max(labels[i, 1], 0.7)
 
-    # "none" where no events active
-    has_event = labels[:, 1:].max(axis=1) > 0
-    labels[~has_event, 0] = 1.0
+        # ── Channel 2: absorption_like ──
+        # Effort > Result: high volume + small body (price didn't move)
+        # Both conditions required: significant volume AND weak price response
+        if vol_ma20[i] > 0 and vol_std20[i] > 0:
+            spread_i = high[i] - low[i]
+            body_i = abs(close[i] - open_[i])
+
+            # Volume must be genuinely elevated (> 1σ above mean)
+            high_effort = volume[i] > vol_ma20[i] + vol_std20[i]
+            # Body must be small relative to spread (indecision)
+            weak_result = body_i < 0.35 * spread_i if spread_i > 0 else False
+            # Spread must be meaningful (not a tiny doji on no activity)
+            meaningful_bar = spread_i >= 0.8 * spread_ma20[i] if spread_ma20[i] > 0 else True
+
+            if high_effort and weak_result and meaningful_bar:
+                labels[i, 2] = 1.0
+
+        # ── Channel 3: exhaustion_like ──
+        # Climax: extreme volume + directional body + fast completion
+        # On range bars, spread is capped by construction, so "wide bar" is
+        # nearly impossible. Instead, exhaustion = the bar fills its fixed range
+        # FAST with high volume and strong directional close.
+        # No future-bar lookahead.
+        if vol_ma20[i] > 0 and vol_std20[i] > 0:
+            climax_vol = volume[i] > vol_ma20[i] + climax_vol_sigma * vol_std20[i]
+            spread_i = high[i] - low[i]
+            body_i = abs(close[i] - open_[i])
+
+            # Directional body: close-open covers >50% of the bar range
+            big_body = body_i > 0.5 * spread_i if spread_i > 0 else False
+
+            # Fast completion: bar filled in less than half the recent average time
+            fast_bar = (has_duration and dur_ma20 is not None
+                        and dur_ma20[i] > 0
+                        and duration[i] < dur_ma20[i] * 0.5)
+
+            if climax_vol and big_body and fast_bar:
+                labels[i, 3] = 1.0
 
     return labels
 
 
-def _compute_excursion(
-    close: np.ndarray, horizon: int
-) -> np.ndarray:
-    """
-    Compute forward-looking favorable/adverse excursion.
-
-    For each bar, look ahead `horizon` bars and compute:
-        favorable = max price move in favorable direction / ATR
-        adverse = max price move in adverse direction / ATR
-
-    Since we don't know the trade direction, we compute both up/down
-    and let the head learn the directional component.
-
-    Returns (n_bars, 2) float32 — [max_up, max_down] normalized.
-    """
-    n = len(close)
-    excursion = np.zeros((n, 2), dtype=np.float32)
-
-    # Local ATR estimate (20-bar rolling range)
-    for i in range(n):
-        end = min(i + horizon, n)
-        if end <= i + 1:
-            continue
-        future = close[i + 1:end]
-        max_up = (future.max() - close[i])
-        max_down = (close[i] - future.min())
-
-        # Normalize by local volatility (20-bar std) to make scale-free
-        local_start = max(0, i - 20)
-        local_std = close[local_start:i + 1].std()
-        if local_std > 1e-6:
-            excursion[i, 0] = max_up / local_std
-            excursion[i, 1] = max_down / local_std
-
-    return excursion
-
+# ═══════════════════════════════════════════════════════════════════════
+# Save / Load
+# ═══════════════════════════════════════════════════════════════════════
 
 def save_labels(labels: dict, output_path: str):
     """Save generated labels to NPZ."""
@@ -624,7 +533,6 @@ def save_labels(labels: dict, output_path: str):
         output_path,
         phase=labels['phase'],
         events=labels['events'],
-        excursion=labels['excursion'],
     )
 
 
@@ -634,5 +542,4 @@ def load_labels(label_path: str) -> dict:
     return {
         'phase': data['phase'],
         'events': data['events'],
-        'excursion': data['excursion'],
     }

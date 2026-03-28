@@ -1,46 +1,37 @@
 """
 Wyckoff event ontology and configuration for the transformer architecture.
 
-Defines the Wyckoff phase labels, event types, and architecture hyperparameters.
+Defines the regime labels, event types, and architecture hyperparameters.
 """
 from dataclasses import dataclass, field
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Wyckoff Phase Labels (Layer 2 — regime classification)
+# Regime Labels (Layer 2 — simplified regime classification)
 # ═══════════════════════════════════════════════════════════════════════
 
-PHASE_LABELS = {
-    0: "no_regime",         # Unclear / transitional
-    1: "accumulation",      # PS → SC → AR → ST → Spring → SOS → LPS → BU
-    2: "re_accumulation",   # Consolidation within markup
-    3: "markup",            # Rising wave structure, demand > supply
-    4: "distribution",      # PSY → BC → AR → ST → UT → SOW → LPSY
-    5: "re_distribution",   # Consolidation within markdown  
-    6: "markdown",          # Falling wave structure, supply > demand
+REGIME_LABELS = {
+    0: "balance",       # Range-bound: accumulation, distribution, re-accum, re-distrib, unclear
+    1: "uptrend",       # Markup: rising structure, demand > supply
+    2: "downtrend",     # Markdown: falling structure, supply > demand
 }
 
-N_PHASES = len(PHASE_LABELS)
+N_REGIMES = len(REGIME_LABELS)
+
+# Legacy alias (kept for loading old checkpoints)
+PHASE_LABELS = REGIME_LABELS
+N_PHASES = N_REGIMES
 
 # ═══════════════════════════════════════════════════════════════════════
-# Wyckoff Event Labels (Layer 2 — event detection)
+# Event Labels (Layer 2 — simplified event detection)
 # Multi-label: multiple events can be active simultaneously
 # ═══════════════════════════════════════════════════════════════════════
 
 EVENT_LABELS = {
-    0: "none",              # No significant event
-    1: "spring",            # Price breaks below support, reverses, low volume
-    2: "upthrust",          # Price breaks above resistance, reverses, low volume
-    3: "selling_climax",    # High volume, wide spread, down — SC
-    4: "buying_climax",     # High volume, wide spread, up — BC
-    5: "test",              # Return to support/resistance on LOW volume
-    6: "sos",               # Sign of Strength — up move on expanding volume
-    7: "sow",               # Sign of Weakness — down move on expanding volume
-    8: "no_demand",         # Up bar on low volume — weakness in disguise
-    9: "no_supply",         # Down bar on low volume — demand in disguise
-    10: "effort_gt_result", # High vol, small displacement — absorption
-    11: "lps",              # Last Point of Support — final test before markup
-    12: "lpsy",             # Last Point of Supply — final test before markdown
+    0: "spring_like",       # Price breaks below support, reverses (includes springs, LPS, tests of support)
+    1: "upthrust_like",     # Price breaks above resistance, reverses (includes UT, LPSY, tests of resistance)
+    2: "absorption_like",   # High effort, little result — indecision / SOT (effort > result, no demand/supply)
+    3: "exhaustion_like",   # Climax volume + reversal — SC/BC terminal moves
 }
 
 N_EVENTS = len(EVENT_LABELS)
@@ -63,7 +54,7 @@ TRANSFORMER_FEATURE_INDICES = [
     9,   # cvd_slope_fast
     12,  # return_1
     14,  # volatility_20
-    # Weis Wave structure (15 features — precomputed wave objects)
+    # Weis Wave structure (11 features — precomputed wave objects, NO heuristic scores)
     15,  # wave_direction
     16,  # wave_progress
     17,  # wave_displacement_norm
@@ -73,34 +64,21 @@ TRANSFORMER_FEATURE_INDICES = [
     21,  # wave_vol_vs_prev
     22,  # wave_disp_vs_same
     23,  # wave_disp_vs_prev
-    27,  # demand_score_3wave
-    28,  # supply_score_3wave
     29,  # wave_vol_trend_up
     30,  # wave_vol_trend_down
     31,  # wave_shortening_up
     32,  # wave_shortening_down
-    # Wyckoff events — raw scores as attention landmarks (6 features)
-    35,  # spring_score
-    36,  # upthrust_score
-    37,  # sc_score
-    38,  # bc_score
-    39,  # absorption_score
-    41,  # stopping_action_score
-    # Range / structural context (4 features)
+    # Range / structural context (3 features)
     48,  # pct_in_range
     49,  # range_width_norm
     50,  # bars_in_range
-    34,  # large_wave_score
-    # Library wave features (6 features)
+    # Library wave features (3 features — pure wave comparison, no heuristic flags)
     61,  # lib_volume_strength
     62,  # lib_wave_vs_same_dir
     64,  # lib_wave_vs_prev
-    67,  # lib_pivot_flag
-    68,  # lib_exhaust_up
-    69,  # lib_exhaust_down
 ]
 
-N_TRANSFORMER_FEATURES = len(TRANSFORMER_FEATURE_INDICES)  # 41
+N_TRANSFORMER_FEATURES = len(TRANSFORMER_FEATURE_INDICES)  # 29
 
 # ═══════════════════════════════════════════════════════════════════════
 # Architecture Configuration
@@ -113,11 +91,11 @@ class TransformerConfig:
     n_bar_features: int = N_TRANSFORMER_FEATURES  # Per-bar input dim
 
     # Encoder
-    d_model: int = 64               # Embedding dimension
+    d_model: int = 48               # Embedding dimension (smaller for small datasets)
     n_heads: int = 4                # Attention heads
-    n_layers: int = 3               # Transformer layers
-    d_ff: int = 128                 # Feed-forward inner dim
-    dropout: float = 0.3            # Dropout rate (higher for small datasets)
+    n_layers: int = 2               # Transformer layers (fewer = less overfit risk)
+    d_ff: int = 96                  # Feed-forward inner dim
+    dropout: float = 0.4            # Dropout rate (aggressive for small datasets)
 
     # Position features (appended at policy layer, not encoder)
     n_position_features: int = 8    # [side, size, entry_dist, unreal, real, bars_in, mfe, mae]
@@ -126,8 +104,8 @@ class TransformerConfig:
     n_actions: int = 6              # HOLD, ENTER_L, ENTER_S, ADD, REDUCE, EXIT
 
     # Heads
-    n_phases: int = N_PHASES        # Phase classification
-    n_events: int = N_EVENTS        # Event detection (multi-label)
+    n_phases: int = N_REGIMES       # Regime classification (balance/uptrend/downtrend)
+    n_events: int = N_EVENTS        # Event detection (multi-label, 4 channels)
 
     # Training
     phase_loss_weight: float = 1.0

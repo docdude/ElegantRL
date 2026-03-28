@@ -94,6 +94,8 @@ class WyckoffTransformerVecEnv:
         reward_mode: str = "dense_pnl",
         sign_flip: bool = True,
         gamma: float = 0.99,
+        feat_mean: np.ndarray | None = None,
+        feat_std: np.ndarray | None = None,
         **kwargs,
     ):
         if config is None:
@@ -123,8 +125,13 @@ class WyckoffTransformerVecEnv:
         self.close_price = th.tensor(close_ary, dtype=th.float32, device=self.device)
         self.tech_factor = th.tensor(tech_ary, dtype=th.float32, device=self.device)
 
-        # Pre-select features and zero-pad for sliding window
+        # Pre-select features and normalize using pre-training stats
         selected = self.tech_factor[:, self._fi]  # (n_bars, n_bar_features)
+        if feat_mean is not None and feat_std is not None:
+            _mean = th.tensor(feat_mean.flatten(), dtype=th.float32, device=self.device)
+            _std = th.tensor(feat_std.flatten(), dtype=th.float32, device=self.device)
+            selected = (selected - _mean.unsqueeze(0)) / _std.unsqueeze(0)
+            print("  [TransformerVecEnv] Applied pre-training feature normalization")
         pad = th.zeros(self.seq_len - 1, self.n_bar_features, dtype=th.float32, device=self.device)
         self._padded_features = th.cat([pad, selected], dim=0)  # (pad + n_bars, n_features)
 

@@ -24,6 +24,7 @@ Usage:
 
 import os
 import sys
+import math
 import argparse
 import numpy as np
 import torch
@@ -37,10 +38,10 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from wyckoff_rl.transformer.config import (
-    TransformerConfig, TRANSFORMER_FEATURE_INDICES, N_PHASES, N_EVENTS,
+    TransformerConfig, TRANSFORMER_FEATURE_INDICES, N_REGIMES, N_EVENTS,
 )
 from wyckoff_rl.transformer.encoder import WyckoffTransformerEncoder
-from wyckoff_rl.transformer.heads import PhaseHead, EventHead, ExcursionHead
+from wyckoff_rl.transformer.heads import PhaseHead, EventHead
 from wyckoff_rl.transformer.actor import ActorDiscreteTransformer, CriticTransformer
 from wyckoff_rl.transformer.env import WyckoffTransformerVecEnv
 from wyckoff_rl.transformer.labels import generate_structural_labels, save_labels, load_labels
@@ -87,11 +88,9 @@ class WyckoffSequenceDataset(Dataset):
         if end_idx > 0:
             self.phase_labels = labels['phase'][:end_idx]
             self.event_labels = labels['events'][:end_idx]
-            self.excursion_labels = labels['excursion'][:end_idx]
         else:
             self.phase_labels = labels['phase']
             self.event_labels = labels['events']
-            self.excursion_labels = labels['excursion']
 
         # Valid indices: need seq_len bars of history
         self.valid_start = self.seq_len
@@ -116,7 +115,6 @@ class WyckoffSequenceDataset(Dataset):
             'features': torch.from_numpy(window),
             'phase': torch.tensor(self.phase_labels[bar_idx], dtype=torch.long),
             'events': torch.from_numpy(self.event_labels[bar_idx]),
-            'excursion': torch.from_numpy(self.excursion_labels[bar_idx]),
         }
 
 
@@ -127,16 +125,17 @@ def pretrain(
     config: TransformerConfig | None = None,
     epochs: int = 50,
     batch_size: int = 64,
-    lr: float = 1e-3,
+    lr: float = 3e-4,
     val_split: float = 0.15,
     save_dir: str = "checkpoints/transformer",
     device: str = "cuda",
     parquet_path: str | None = None,
     label_smoothing: float = 0.1,
-    weight_decay: float = 5e-3,
+    weight_decay: float = 0.01,
     patience: int = 10,
-    noise_std: float = 0.02,
+    noise_std: float = 0.03,
     train_end_bar: int = 0,
+    warmup_epochs: int = 5,
 ):
     """
     Phase 1: Supervised pre-training of encoder + heads.
@@ -162,10 +161,10 @@ def pretrain(
             save_labels(labels, label_path)
             print(f"  Saved to {label_path}")
             # Print label distribution
-            phase_counts = np.bincount(labels['phase'], minlength=N_PHASES)
-            print(f"  Phase distribution: {dict(enumerate(phase_counts.tolist()))}")
-            event_counts = labels['events'][:, 1:].sum(axis=0)
-            print(f"  Event counts (excl. none): {event_counts.astype(int).tolist()}")
+            phase_counts = np.bincount(labels['phase'], minlength=N_REGIMES)
+            print(f"  Regime distribution: {dict(enumerate(phase_counts.tolist()))}")
+            event_counts = labels['events'].sum(axis=0)
+            print(f"  Event counts: {event_counts.astype(int).tolist()}")
 
     # Dataset — train set gets augmentation, val does not
     # If train_end_bar is set, both datasets are sliced to exclude the holdout
@@ -206,14 +205,12 @@ def pretrain(
     encoder = WyckoffTransformerEncoder(config).to(dev)
     phase_head = PhaseHead(config).to(dev)
     event_head = EventHead(config).to(dev)
-    excursion_head = ExcursionHead(config).to(dev)
 
     if pretrained_path and os.path.exists(pretrained_path):
         ckpt = torch.load(pretrained_path, map_location='cpu', weights_only=False)
         encoder.load_state_dict(ckpt['encoder'])
         phase_head.load_state_dict(ckpt['phase_head'])
         event_head.load_state_dict(ckpt['event_head'])
-        excursion_head.load_state_dict(ckpt['excursion_head'])
         print(
             f"Loaded pre-trained weights for supervised warm start from "
             f"{pretrained_path} (epoch={ckpt.get('epoch')}, "
@@ -222,33 +219,49 @@ def pretrain(
 
     # Count parameters
     n_params = sum(p.numel() for p in encoder.parameters())
-    n_params += sum(p.numel() for m in [phase_head, event_head, excursion_head]
+    n_params += sum(p.numel() for m in [phase_head, event_head]
                     for p in m.parameters())
     print(f"Total parameters: {n_params:,}")
 
     print(f"Params/sample ratio: {n_params / n_train:.1f}")
 
-    # Phase class weights — inverse frequency for imbalanced labels
+    # Regime class weights — inverse frequency for imbalanced labels
     phase_counts = np.bincount(train_full.phase_labels[:n_train + train_full.valid_start],
-                               minlength=N_PHASES).astype(np.float32)
+                               minlength=N_REGIMES).astype(np.float32)
     phase_counts = np.maximum(phase_counts, 1.0)
     phase_weights = (1.0 / phase_counts)
-    phase_weights = phase_weights / phase_weights.sum() * N_PHASES  # normalize
+    phase_weights = phase_weights / phase_weights.sum() * N_REGIMES  # normalize
     phase_weights_t = torch.from_numpy(phase_weights).to(dev)
-    print(f"Phase weights: {dict(zip(range(N_PHASES), [f'{w:.2f}' for w in phase_weights]))}")
+    print(f"Regime weights: {dict(zip(range(N_REGIMES), [f'{w:.2f}' for w in phase_weights]))}")
+
+    # Event pos_weight — ratio of negatives to positives per event channel
+    event_labels_train = train_full.event_labels[:n_train + train_full.valid_start]
+    event_pos = (event_labels_train > 0.5).sum(axis=0).astype(np.float32)
+    event_neg = (event_labels_train <= 0.5).sum(axis=0).astype(np.float32)
+    event_pw = np.clip(event_neg / np.maximum(event_pos, 1.0), 1.0, 50.0)
+    event_pos_weight = torch.from_numpy(event_pw).to(dev)
+    print(f"Event pos_weight: {[f'{w:.1f}' for w in event_pw]}")
 
     # Optimizer
     all_params = (list(encoder.parameters()) + list(phase_head.parameters())
-                  + list(event_head.parameters()) + list(excursion_head.parameters()))
+                  + list(event_head.parameters()))
     optimizer = torch.optim.AdamW(all_params, lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    # LR schedule: linear warmup then cosine decay
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        progress = (epoch - warmup_epochs) / max(epochs - warmup_epochs, 1)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     best_val_loss = float('inf')
     epochs_no_improve = 0
 
     for epoch in range(epochs):
         # ── Train ──
-        encoder.train(); phase_head.train(); event_head.train(); excursion_head.train()
+        encoder.train(); phase_head.train(); event_head.train()
         train_loss = 0.0
         n_batches = 0
 
@@ -256,7 +269,6 @@ def pretrain(
             feats = batch['features'].to(dev)            # (B, seq, F)
             phase_tgt = batch['phase'].to(dev)            # (B,)
             event_tgt = batch['events'].to(dev)           # (B, N_EVENTS)
-            excur_tgt = batch['excursion'].to(dev)        # (B, 2)
 
             # Forward
             latent = encoder(feats)              # (B, seq, d_model)
@@ -266,12 +278,11 @@ def pretrain(
                 phase_head(last_latent), phase_tgt,
                 weight=phase_weights_t, label_smoothing=label_smoothing,
             )
-            loss_event = event_head.loss(last_latent, event_tgt)
-            loss_excur = excursion_head.loss(last_latent, excur_tgt)
+            loss_event = event_head.loss(last_latent, event_tgt,
+                                         pos_weight=event_pos_weight)
 
             loss = (config.phase_loss_weight * loss_phase
-                    + config.event_loss_weight * loss_event
-                    + loss_excur)
+                    + config.event_loss_weight * loss_event)
 
             optimizer.zero_grad()
             loss.backward()
@@ -285,7 +296,7 @@ def pretrain(
         avg_train_loss = train_loss / max(n_batches, 1)
 
         # ── Validate ──
-        encoder.eval(); phase_head.eval(); event_head.eval(); excursion_head.eval()
+        encoder.eval(); phase_head.eval(); event_head.eval()
         val_loss = 0.0
         phase_correct = 0
         n_val_samples = 0
@@ -295,7 +306,6 @@ def pretrain(
                 feats = batch['features'].to(dev)
                 phase_tgt = batch['phase'].to(dev)
                 event_tgt = batch['events'].to(dev)
-                excur_tgt = batch['excursion'].to(dev)
 
                 latent = encoder(feats)
                 last_latent = latent[:, -1, :]
@@ -304,12 +314,11 @@ def pretrain(
                     phase_head(last_latent), phase_tgt,
                     weight=phase_weights_t, label_smoothing=label_smoothing,
                 )
-                loss_event = event_head.loss(last_latent, event_tgt)
-                loss_excur = excursion_head.loss(last_latent, excur_tgt)
+                loss_event = event_head.loss(last_latent, event_tgt,
+                                             pos_weight=event_pos_weight)
 
                 loss = (config.phase_loss_weight * loss_phase
-                        + config.event_loss_weight * loss_event
-                        + loss_excur)
+                        + config.event_loss_weight * loss_event)
                 val_loss += loss.item() * feats.shape[0]
 
                 # Phase accuracy
@@ -334,7 +343,6 @@ def pretrain(
                 'encoder': encoder.state_dict(),
                 'phase_head': phase_head.state_dict(),
                 'event_head': event_head.state_dict(),
-                'excursion_head': excursion_head.state_dict(),
                 'config': config,
                 'epoch': epoch + 1,
                 'val_loss': avg_val_loss,
@@ -367,7 +375,6 @@ def load_pretrained(actor: ActorDiscreteTransformer, checkpoint_path: str):
     actor.encoder.load_state_dict(ckpt['encoder'])
     actor.phase_head.load_state_dict(ckpt['phase_head'])
     actor.event_head.load_state_dict(ckpt['event_head'])
-    actor.excursion_head.load_state_dict(ckpt['excursion_head'])
     print(f"Loaded pre-trained encoder from {checkpoint_path} "
           f"(epoch={ckpt.get('epoch')}, phase_acc={ckpt.get('phase_acc', 0):.3f})")
 
@@ -417,6 +424,16 @@ def rl_train(
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 
+    # ── Extract pre-training feature stats for env normalization ────────
+    feat_mean, feat_std = None, None
+    if pretrained_path and os.path.exists(pretrained_path):
+        _ckpt = torch.load(pretrained_path, map_location='cpu', weights_only=False)
+        feat_mean = _ckpt.get('feat_mean')
+        feat_std = _ckpt.get('feat_std')
+        if feat_mean is not None:
+            print("  Extracted feat_mean/feat_std from pretrained checkpoint")
+        del _ckpt
+
     # ── Build environment ────────────────────────────────────────────────
     env_end_idx = train_end_bar if train_end_bar > 0 else 0
     if env_end_idx > 0:
@@ -433,6 +450,8 @@ def rl_train(
         bar_range=bar_range,
         reward_mode=reward_mode,
         end_idx=env_end_idx,
+        feat_mean=feat_mean,
+        feat_std=feat_std,
         **env_kwargs,
     )
 
@@ -452,8 +471,7 @@ def rl_train(
     actor_encoder_params = list(actor.encoder.parameters())
     actor_head_params = (list(actor.policy_head.parameters())
                          + list(actor.phase_head.parameters())
-                         + list(actor.event_head.parameters())
-                         + list(actor.excursion_head.parameters()))
+                         + list(actor.event_head.parameters()))
 
     actor_optimizer = torch.optim.Adam([
         {'params': actor_encoder_params, 'lr': lr_actor * encoder_lr_scale},
@@ -494,6 +512,7 @@ def rl_train(
         rewards_buf = torch.zeros(horizon_len, num_envs, device=device)
         dones_buf = torch.zeros(horizon_len, num_envs, dtype=torch.bool, device=device)
         values_buf = torch.zeros(horizon_len, num_envs, device=device)
+        bar_idx_buf = torch.zeros(horizon_len, num_envs, dtype=torch.long, device=device)
 
         actor.eval()
         critic.eval()
@@ -501,6 +520,7 @@ def rl_train(
         with torch.no_grad():
             for t in range(horizon_len):
                 states_buf[t] = state
+                bar_idx_buf[t] = env.day.clone()
                 action, logprob = actor.get_action(state)
                 value = critic(state)
 
@@ -547,6 +567,7 @@ def rl_train(
         b_logprobs = logprobs_buf.reshape(-1)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
+        b_bar_idx = bar_idx_buf.reshape(-1)
 
         # Normalize advantages
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
@@ -581,10 +602,21 @@ def rl_train(
 
                 actor_loss = policy_loss + entropy_coeff * entropy_loss
 
-                # Auxiliary losses (if labels available)
-                # Note: this is a simplified version. In production,
-                # you'd index into the label arrays using the env's bar positions.
-                # For now, aux losses are applied during pre-training only.
+                # Auxiliary losses from supervised heads
+                if aux_labels is not None:
+                    mb_bar = b_bar_idx[idx].cpu().numpy()
+                    mb_bar = np.clip(mb_bar, 0, len(aux_labels['phase']) - 1)
+                    phase_tgt = torch.tensor(
+                        aux_labels['phase'][mb_bar], dtype=torch.long, device=device)
+                    event_tgt = torch.tensor(
+                        aux_labels['events'][mb_bar], dtype=torch.float32, device=device)
+                    a_losses = actor.get_aux_losses(
+                        mb_states,
+                        phase_targets=phase_tgt,
+                        event_targets=event_tgt,
+                    )
+                    aux_total = sum(a_losses.values())
+                    actor_loss = actor_loss + aux_loss_coeff * aux_total
 
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
@@ -655,15 +687,17 @@ def main():
     # Pre-training args
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--pretrain-lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=5e-3)
+    parser.add_argument("--pretrain-lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--label-smoothing", type=float, default=0.1)
     parser.add_argument("--patience", type=int, default=10,
                         help="Early stopping patience (0=disabled)")
-    parser.add_argument("--noise-std", type=float, default=0.02,
+    parser.add_argument("--noise-std", type=float, default=0.03,
                         help="Gaussian noise augmentation std")
-    parser.add_argument("--dropout", type=float, default=0.3,
+    parser.add_argument("--dropout", type=float, default=0.4,
                         help="Dropout rate (encoder + heads)")
+    parser.add_argument("--warmup-epochs", type=int, default=5,
+                        help="LR linear warmup epochs")
 
     # RL args
     parser.add_argument("--total-steps", type=int, default=500_000)
@@ -686,8 +720,8 @@ def main():
 
     # Architecture overrides
     parser.add_argument("--seq-len", type=int, default=128)
-    parser.add_argument("--d-model", type=int, default=64)
-    parser.add_argument("--n-layers", type=int, default=3)
+    parser.add_argument("--d-model", type=int, default=48)
+    parser.add_argument("--n-layers", type=int, default=2)
     parser.add_argument("--n-heads", type=int, default=4)
 
     args = parser.parse_args()
@@ -719,6 +753,7 @@ def main():
             patience=args.patience,
             noise_std=args.noise_std,
             train_end_bar=args.train_end_bar,
+            warmup_epochs=args.warmup_epochs,
         )
 
     if args.phase in ("rl", "both"):
