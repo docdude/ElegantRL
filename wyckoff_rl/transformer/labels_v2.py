@@ -99,6 +99,22 @@ class WyckoffLabelConfig:
     min_event_confidence: float = 0.60
     min_breakout_confidence: float = 0.60
 
+    # Threshold gates (previously hardcoded in function bodies)
+    climax_tentative_gate: float = 0.62
+    vol_rank_lookback: int = 8
+    sos_follow_min: float = 0.55
+    sow_follow_min: float = 0.35
+    st_conf_gate: float = 0.55
+    failed_terminal_gate: float = 0.35
+    lps_resume_min: float = 0.55
+    lps_conf_gate: float = 0.60
+    weight_cap: float = 0.50
+    weight_cap_events: tuple = field(default_factory=lambda: ("st_support", "st_resistance", "sos", "lpsy"))
+    trend_strong_threshold: float = 0.75
+    trend_gap_min: float = 0.15
+    min_wave_bars: int = 3
+    zigzag_pct_reversal: float = 0.005
+
 
 @dataclass
 class RangeObject:
@@ -163,7 +179,7 @@ def generate_structural_labels(
     if npz_path is not None:
         _verify_alignment(df, npz_path)
 
-    waves, _ = _get_wave_segments(df)
+    waves, _ = _get_wave_segments(df, cfg)
     wave_df = build_wave_table(df, waves)
 
     phase = np.full(n, PHASE_IGNORE_INDEX, dtype=np.int64)
@@ -173,7 +189,7 @@ def generate_structural_labels(
     event_weight = np.zeros((n, N_EVENTS), dtype=np.float32)
 
     # 1) Background trend labels: only markdown / markup / ignore
-    bg_phase, bg_weight = _label_trend_background(df, waves, trend_window=cfg.phase_trend_window)
+    bg_phase, bg_weight = _label_trend_background(df, waves, cfg)
     phase[:] = bg_phase
     phase_weight[:] = bg_weight
 
@@ -194,11 +210,10 @@ def generate_structural_labels(
 
     # 7) Cap event_weight for low-alpha events (applied AFTER deconfliction
     #    so tie-breaking uses true confidence, not capped weight)
-    _WEIGHT_CAP = 0.50
-    for ename in ("st_support", "st_resistance", "sos", "lpsy"):
+    for ename in cfg.weight_cap_events:
         eidx = EVENT_TO_IDX[ename]
         mask = events[:, eidx] > 0
-        event_weight[mask, eidx] = np.minimum(event_weight[mask, eidx], _WEIGHT_CAP)
+        event_weight[mask, eidx] = np.minimum(event_weight[mask, eidx], cfg.weight_cap)
 
     return {
         "phase": phase,
@@ -334,12 +349,13 @@ def _mark_event(events: np.ndarray, event_weight: np.ndarray, bar_idx: int, even
 # Wave segmentation
 # ═══════════════════════════════════════════════════════════════════════
 
-def _get_wave_segments(df: pd.DataFrame):
+def _get_wave_segments(df: pd.DataFrame, cfg: WyckoffLabelConfig | None = None):
     try:
         from wyckoff_effort.pipeline.wyckoff_features import _segment_waves_nolag
         return _segment_waves_nolag(df)
     except ImportError:
-        return _simple_zigzag_waves(df), None
+        pct = cfg.zigzag_pct_reversal if cfg is not None else 0.005
+        return _simple_zigzag_waves(df, pct_reversal=pct), None
 
 
 def _simple_zigzag_waves(df: pd.DataFrame, pct_reversal: float = 0.005) -> dict:
@@ -457,7 +473,7 @@ def _is_tentative_sc(wave_df: pd.DataFrame, i: int, cfg: WyckoffLabelConfig) -> 
     conf = _climax_conf(wave_df, i, RangeSide.ACCUM, cfg)
     vol_rank = _same_dir_rank(wave_df, i, "volume", cfg.climax_lookback_waves)
     disp_rank = _same_dir_rank(wave_df, i, "displacement", cfg.climax_lookback_waves)
-    return conf >= 0.62 and (vol_rank >= cfg.climax_vol_pct or disp_rank >= cfg.climax_disp_pct)
+    return conf >= cfg.climax_tentative_gate and (vol_rank >= cfg.climax_vol_pct or disp_rank >= cfg.climax_disp_pct)
 
 
 def _is_tentative_bc(wave_df: pd.DataFrame, i: int, cfg: WyckoffLabelConfig) -> bool:
@@ -466,7 +482,7 @@ def _is_tentative_bc(wave_df: pd.DataFrame, i: int, cfg: WyckoffLabelConfig) -> 
     conf = _climax_conf(wave_df, i, RangeSide.DISTR, cfg)
     vol_rank = _same_dir_rank(wave_df, i, "volume", cfg.climax_lookback_waves)
     disp_rank = _same_dir_rank(wave_df, i, "displacement", cfg.climax_lookback_waves)
-    return conf >= 0.62 and (vol_rank >= cfg.climax_vol_pct or disp_rank >= cfg.climax_disp_pct)
+    return conf >= cfg.climax_tentative_gate and (vol_rank >= cfg.climax_vol_pct or disp_rank >= cfg.climax_disp_pct)
 
 
 def _response_ratio(ro: RangeObject, w: pd.Series) -> float:
@@ -479,9 +495,9 @@ def _response_ratio(ro: RangeObject, w: pd.Series) -> float:
     return max(wave_retrace, bar_retrace)
 
 
-def _automatic_response_conf(wave_df: pd.DataFrame, i: int, ro: RangeObject) -> float:
+def _automatic_response_conf(wave_df: pd.DataFrame, i: int, ro: RangeObject, cfg: WyckoffLabelConfig) -> float:
     resp = _clip01(_response_ratio(ro, wave_df.iloc[i]))
-    vol_rank = _same_dir_rank(wave_df, i, "volume", 8)
+    vol_rank = _same_dir_rank(wave_df, i, "volume", cfg.vol_rank_lookback)
     return _clip01(0.65 * resp + 0.35 * vol_rank)
 
 
@@ -797,14 +813,14 @@ def _sos_conf(ro: RangeObject, wave_df: pd.DataFrame, i: int, cfg: WyckoffLabelC
         return None
 
     close_loc = _wave_close_location(w, bullish=True)
-    vol_rank = _same_dir_rank(wave_df, i, "volume", 8)
-    disp_rank = _same_dir_rank(wave_df, i, "displacement", 8)
+    vol_rank = _same_dir_rank(wave_df, i, "volume", cfg.vol_rank_lookback)
+    disp_rank = _same_dir_rank(wave_df, i, "displacement", cfg.vol_rank_lookback)
 
     if vol_rank < cfg.breakout_vol_rank_min and disp_rank < cfg.breakout_disp_rank_min:
         return None
 
     follow_score = _breakout_followthrough_conf(ro, wave_df, i, cfg, bullish=True)
-    if follow_score < 0.55:
+    if follow_score < cfg.sos_follow_min:
         return None
 
     break_score = _clip01(breakout / max(cfg.breakout_min_frac, 1e-6))
@@ -849,14 +865,14 @@ def _sow_conf(ro: RangeObject, wave_df: pd.DataFrame, i: int, cfg: WyckoffLabelC
         return None
 
     close_loc = _wave_close_location(w, bullish=False)
-    vol_rank = _same_dir_rank(wave_df, i, "volume", 8)
-    disp_rank = _same_dir_rank(wave_df, i, "displacement", 8)
+    vol_rank = _same_dir_rank(wave_df, i, "volume", cfg.vol_rank_lookback)
+    disp_rank = _same_dir_rank(wave_df, i, "displacement", cfg.vol_rank_lookback)
 
     if vol_rank < cfg.breakout_vol_rank_min and disp_rank < cfg.breakout_disp_rank_min:
         return None
 
     follow_score = _breakout_followthrough_conf(ro, wave_df, i, cfg, bullish=False)
-    if follow_score < 0.35:
+    if follow_score < cfg.sow_follow_min:
         return None
 
     break_score = _clip01(breakout / max(cfg.breakout_min_frac, 1e-6))
@@ -937,7 +953,7 @@ def _scan_range_structures(
                     ro.status = RangeStatus.SEEK_TESTS
 
                     _mark_event(events, event_weight, ro.climax_bar, "selling_climax", _climax_conf(wave_df, ro.climax_wave, RangeSide.ACCUM, cfg))
-                    _mark_event(events, event_weight, ro.response_bar, "automatic_rally", _automatic_response_conf(wave_df, i, ro))
+                    _mark_event(events, event_weight, ro.response_bar, "automatic_rally", _automatic_response_conf(wave_df, i, ro, cfg))
 
                     updated.append(ro)
                     continue
@@ -951,7 +967,7 @@ def _scan_range_structures(
                     ro.status = RangeStatus.SEEK_TESTS
 
                     _mark_event(events, event_weight, ro.climax_bar, "buying_climax", _climax_conf(wave_df, ro.climax_wave, RangeSide.DISTR, cfg))
-                    _mark_event(events, event_weight, ro.response_bar, "automatic_reaction", _automatic_response_conf(wave_df, i, ro))
+                    _mark_event(events, event_weight, ro.response_bar, "automatic_reaction", _automatic_response_conf(wave_df, i, ro, cfg))
 
                     updated.append(ro)
                     continue
@@ -969,12 +985,12 @@ def _scan_range_structures(
 
                 if ro.side == RangeSide.ACCUM and added_support:
                     conf = _support_test_conf(ro, wave_df, i, cfg)
-                    if conf is not None and conf >= 0.55:
+                    if conf is not None and conf >= cfg.st_conf_gate:
                         _mark_event(events, event_weight, int(w["end_idx"]), "st_support", conf)
 
                 if ro.side == RangeSide.DISTR and added_resistance:
                     conf = _resistance_test_conf(ro, wave_df, i, cfg)
-                    if conf is not None and conf >= 0.55:
+                    if conf is not None and conf >= cfg.st_conf_gate:
                         _mark_event(events, event_weight, int(w["end_idx"]), "st_resistance", conf)
 
                 if ro.status == RangeStatus.SEEK_TESTS and ro.maturity >= cfg.mature_threshold:
@@ -991,7 +1007,7 @@ def _scan_range_structures(
                             _mark_event(events, event_weight, int(w["end_idx"]), "spring", conf)
                             updated.append(ro)
                             continue
-                        if conf >= 0.35:
+                        if conf >= cfg.failed_terminal_gate:
                             ro.status = RangeStatus.FAILED
                             ro.end_bar = int(w["end_idx"])
                             _mark_event(events, event_weight, int(w["end_idx"]), "failed_spring", conf)
@@ -1007,7 +1023,7 @@ def _scan_range_structures(
                             _mark_event(events, event_weight, int(w["end_idx"]), "upthrust", conf)
                             updated.append(ro)
                             continue
-                        if conf >= 0.35:
+                        if conf >= cfg.failed_terminal_gate:
                             ro.status = RangeStatus.FAILED
                             ro.end_bar = int(w["end_idx"])
                             _mark_event(events, event_weight, int(w["end_idx"]), "failed_upthrust", conf)
@@ -1132,7 +1148,7 @@ def _post_label_continuation_events(
                     continue
 
                 resume_score = _resume_after_pullback_conf(ro, wave_df, j, cfg, bullish=True)
-                if resume_score < 0.55:
+                if resume_score < cfg.lps_resume_min:
                     continue
 
                 hold_score = _clip01((low - hold_level) / max(ro.width * cfg.lps_tolerance_frac, 1e-6))
@@ -1152,7 +1168,7 @@ def _post_label_continuation_events(
                     0.20 * resume_score
                 )
 
-                if conf >= 0.60:
+                if conf >= cfg.lps_conf_gate:
                     ro.continuation_wave = j
                     _mark_event(events, event_weight, int(w["end_idx"]), "lps", conf)
                     break
@@ -1188,7 +1204,7 @@ def _post_label_continuation_events(
                     continue
 
                 resume_score = _resume_after_pullback_conf(ro, wave_df, j, cfg, bullish=False)
-                if resume_score < 0.55:
+                if resume_score < cfg.lps_resume_min:
                     continue
 
                 hold_score = _clip01((fail_level - high) / max(ro.width * cfg.lps_tolerance_frac, 1e-6))
@@ -1208,7 +1224,7 @@ def _post_label_continuation_events(
                     0.20 * resume_score
                 )
 
-                if conf >= 0.60:
+                if conf >= cfg.lps_conf_gate:
                     ro.continuation_wave = j
                     _mark_event(events, event_weight, int(w["end_idx"]), "lpsy", conf)
                     break
@@ -1265,7 +1281,7 @@ def _paint_post_breakout_phases(
 def _label_trend_background(
     df: pd.DataFrame,
     waves: dict,
-    trend_window: int = 5,
+    cfg: WyckoffLabelConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Background trend labels:
@@ -1284,8 +1300,9 @@ def _label_trend_background(
     wave_high = waves["wave_high"]
     wave_low = waves["wave_low"]
 
-    sh_prices, sl_prices, sh_bars, sl_bars = _extract_pivots(wave_id, wave_dir, wave_high, wave_low)
+    sh_prices, sl_prices, sh_bars, sl_bars = _extract_pivots(wave_id, wave_dir, wave_high, wave_low, cfg.min_wave_bars)
 
+    trend_window = cfg.phase_trend_window
     if len(sh_prices) < trend_window or len(sl_prices) < trend_window:
         return labels, weights
 
@@ -1313,18 +1330,18 @@ def _label_trend_background(
         up_score = 0.50 * (hh / max(tw, 1)) + 0.50 * (hl / max(tw, 1))
         dn_score = 0.50 * (ll / max(tw, 1)) + 0.50 * (lh / max(tw, 1))
 
-        if up_score >= 0.75 and up_score > dn_score + 0.15:
+        if up_score >= cfg.trend_strong_threshold and up_score > dn_score + cfg.trend_gap_min:
             labels[i] = REGIME_TO_IDX["markup"]
             weights[i] = np.float32(up_score)
 
-        elif dn_score >= 0.75 and dn_score > up_score + 0.15:
+        elif dn_score >= cfg.trend_strong_threshold and dn_score > up_score + cfg.trend_gap_min:
             labels[i] = REGIME_TO_IDX["markdown"]
             weights[i] = np.float32(dn_score)
 
     return labels, weights
 
 
-def _extract_pivots(wave_id, wave_dir, wave_high, wave_low):
+def _extract_pivots(wave_id, wave_dir, wave_high, wave_low, min_wave_bars: int = 3):
     n = len(wave_id)
     raw_waves = []
     seg_start = 0
@@ -1339,7 +1356,6 @@ def _extract_pivots(wave_id, wave_dir, wave_high, wave_low):
 
     raw_waves.append((n - 1, wave_dir[n - 1] > 0, wave_high[n - 1], wave_low[n - 1], n - seg_start))
 
-    min_wave_bars = 3
     significant = []
     for w in raw_waves:
         if w[4] >= min_wave_bars:
