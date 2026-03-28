@@ -94,7 +94,7 @@ class TransformerConfig:
     d_model: int = 32               # Embedding dimension (smaller for small datasets)
     n_heads: int = 4                # Attention heads
     n_layers: int = 2               # Transformer layers (fewer = less overfit risk)
-    d_ff: int = 64                  # Feed-forward inner dim
+    d_ff: int = 96                  # Feed-forward inner dim (3x d_model)
     dropout: float = 0.3            # Dropout rate
 
     # Position features (appended at policy layer, not encoder)
