@@ -225,19 +225,19 @@ def pretrain(
     label_path: str | None = None,
     pretrained_path: str | None = None,
     config: TransformerConfig | None = None,
-    epochs: int = 60,
-    batch_size: int = 64,
-    lr: float = 5e-5,
+    epochs: int = 100,
+    batch_size: int = 128,
+    lr: float = 4e-5,
     val_split: float = 0.15,
     save_dir: str = "checkpoints/transformer",
     device: str = "cuda",
     parquet_path: str | None = None,
-    label_smoothing: float = 0.1,
-    weight_decay: float = 0.05,
-    patience: int = 15,
-    noise_std: float = 0.02,
+    label_smoothing: float = 0.12,
+    weight_decay: float = 0.08,
+    patience: int = 20,
+    noise_std: float = 0.03,
     train_end_bar: int = 0,
-    warmup_epochs: int = 5,
+    warmup_epochs: int = 6,
 ):
     if config is None:
         config = TransformerConfig()
@@ -949,15 +949,15 @@ def main():
     parser.add_argument("--gpu-id", type=int, default=0)
 
     # Pre-training args
-    parser.add_argument("--epochs", type=int, default=60)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--pretrain-lr", type=float, default=5e-5)
-    parser.add_argument("--weight-decay", type=float, default=0.05)
-    parser.add_argument("--label-smoothing", type=float, default=0.1)
-    parser.add_argument("--patience", type=int, default=15)
-    parser.add_argument("--noise-std", type=float, default=0.02)
-    parser.add_argument("--dropout", type=float, default=0.3)
-    parser.add_argument("--warmup-epochs", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--pretrain-lr", type=float, default=4e-5)
+    parser.add_argument("--weight-decay", type=float, default=0.08)
+    parser.add_argument("--label-smoothing", type=float, default=0.12)
+    parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--noise-std", type=float, default=0.03)
+    parser.add_argument("--dropout", type=float, default=0.38)
+    parser.add_argument("--warmup-epochs", type=int, default=6)
 
     # RL args
     parser.add_argument("--total-steps", type=int, default=50_000_000)

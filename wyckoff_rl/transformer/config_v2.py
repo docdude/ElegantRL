@@ -119,7 +119,7 @@ class TransformerConfig:
     n_heads: int = 4
     n_layers: int = 2
     d_ff: int = 96
-    dropout: float = 0.30
+    dropout: float = 0.38
 
     # Position features
     n_position_features: int = 8
