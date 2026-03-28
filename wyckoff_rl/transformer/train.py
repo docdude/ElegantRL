@@ -383,9 +383,9 @@ def rl_train(
     npz_path: str,
     pretrained_path: str | None = None,
     config: TransformerConfig | None = None,
-    total_steps: int = 500_000,
+    total_steps: int = 10_000_000,
     num_envs: int = 512,
-    horizon_len: int = 256,
+    horizon_len: int = 512,
     lr_actor: float = 3e-4,
     lr_critic: float = 1e-3,
     gamma: float = 0.99,
@@ -700,9 +700,9 @@ def main():
                         help="LR linear warmup epochs")
 
     # RL args
-    parser.add_argument("--total-steps", type=int, default=500_000)
+    parser.add_argument("--total-steps", type=int, default=10_000_000)
     parser.add_argument("--num-envs", type=int, default=512)
-    parser.add_argument("--horizon-len", type=int, default=256)
+    parser.add_argument("--horizon-len", type=int, default=512)
     parser.add_argument("--rl-lr", type=float, default=3e-4)
     parser.add_argument("--episode-len", type=int, default=512)
     parser.add_argument("--reward-mode", default="dense_pnl")
@@ -759,7 +759,7 @@ def main():
     if args.phase in ("rl", "both"):
         # Auto-discover pretrained checkpoint if not explicitly provided
         if pretrained_path is None:
-            auto_path = os.path.join(args.save_dir, "best_pretrained.pt")
+            auto_path = os.path.join(args.save_dir, "pretrained_best.pt")
             if os.path.exists(auto_path):
                 pretrained_path = auto_path
                 print(f"Auto-discovered pretrained checkpoint: {auto_path}")
