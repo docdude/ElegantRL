@@ -53,6 +53,11 @@ class RangeStatus(Enum):
 
 @dataclass
 class WyckoffLabelConfig:
+    # Pivot detection mode: "swing" (confirmed H/L) or "nolag" (srl library)
+    pivot_mode: str = "swing"
+    swing_left: int = 4
+    swing_right: int = 2
+
     trend_lookback_waves: int = 6
     climax_lookback_waves: int = 12
 
@@ -62,7 +67,7 @@ class WyckoffLabelConfig:
     ar_min_response_ratio: float = 0.50
 
     st_tolerance_frac: float = 0.12
-    test_vol_max_ratio: float = 0.75
+    test_vol_max_ratio: float = 0.90
 
     spring_min_break_frac: float = 0.02
     spring_max_break_frac: float = 0.18
@@ -82,10 +87,10 @@ class WyckoffLabelConfig:
     mature_breakout_window: int = 12
 
     lps_tolerance_frac: float = 0.10
-    lps_search_waves: int = 5
+    lps_search_waves: int = 12
     lps_min_waves_after_breakout: int = 1
     lps_vol_max_ratio: float = 0.75
-    lps_close_hold_frac: float = 0.03
+    lps_close_hold_frac: float = 0.15
     lps_max_retrace_frac: float = 0.45
     lps_max_disp_ratio: float = 0.80
     lps_resume_waves: int = 2
@@ -93,7 +98,7 @@ class WyckoffLabelConfig:
 
     min_range_tests: int = 2
     mature_threshold: float = 0.55
-    max_range_waves: int = 20
+    max_range_waves: int = 60
 
     phase_trend_window: int = 5
     min_event_confidence: float = 0.60
@@ -102,11 +107,11 @@ class WyckoffLabelConfig:
     # Threshold gates (previously hardcoded in function bodies)
     climax_tentative_gate: float = 0.62
     vol_rank_lookback: int = 8
-    sos_follow_min: float = 0.55
+    sos_follow_min: float = 0.40
     sow_follow_min: float = 0.35
     st_conf_gate: float = 0.55
     failed_terminal_gate: float = 0.35
-    lps_resume_min: float = 0.55
+    lps_resume_min: float = 0.40
     lps_conf_gate: float = 0.60
     weight_cap: float = 0.50
     weight_cap_events: tuple = field(default_factory=lambda: ("st_support", "st_resistance", "sos", "lpsy"))
@@ -350,12 +355,139 @@ def _mark_event(events: np.ndarray, event_weight: np.ndarray, bar_idx: int, even
 # ═══════════════════════════════════════════════════════════════════════
 
 def _get_wave_segments(df: pd.DataFrame, cfg: WyckoffLabelConfig | None = None):
-    try:
-        from wyckoff_effort.pipeline.wyckoff_features import _segment_waves_nolag
-        return _segment_waves_nolag(df)
-    except ImportError:
+    mode = cfg.pivot_mode if cfg is not None else "swing"
+    if mode == "swing":
+        swl = cfg.swing_left if cfg is not None else 8
+        swr = cfg.swing_right if cfg is not None else 3
+        return _swing_pivot_waves(df, swing_left=swl, swing_right=swr), None
+    elif mode == "nolag":
+        try:
+            from wyckoff_effort.pipeline.wyckoff_features import _segment_waves_nolag
+            return _segment_waves_nolag(df)
+        except ImportError:
+            pct = cfg.zigzag_pct_reversal if cfg is not None else 0.005
+            return _simple_zigzag_waves(df, pct_reversal=pct), None
+    else:
         pct = cfg.zigzag_pct_reversal if cfg is not None else 0.005
         return _simple_zigzag_waves(df, pct_reversal=pct), None
+
+
+def _swing_pivot_waves(
+    df: pd.DataFrame,
+    swing_left: int = 8,
+    swing_right: int = 3,
+) -> dict:
+    """Confirmed swing-pivot wave segmentation (similar to ta.pivothigh/low).
+
+    A pivot high is confirmed when the high at bar *c* is the highest
+    among bars [c - swing_left, c + swing_right].  Analogous for lows.
+    This naturally filters micro-noise and produces meaningful structural
+    waves — roughly equivalent to MAD135's swL=10/swR=5 on 5-min bars.
+    """
+    high = df["high"].values.astype(np.float64)
+    low = df["low"].values.astype(np.float64)
+    close = df["close"].values.astype(np.float64)
+    volume = df["volume"].values.astype(np.float64)
+    n = len(df)
+
+    # --- Pass 1: find confirmed pivot indices -----------------------
+    pivot_idx: list[int] = []      # bar index of each pivot
+    pivot_type: list[int] = []     # +1 = swing high, -1 = swing low
+
+    for c in range(swing_left, n - swing_right):
+        is_hi = True
+        for j in range(c - swing_left, c + swing_right + 1):
+            if j != c and high[j] >= high[c]:
+                is_hi = False
+                break
+        is_lo = True
+        for j in range(c - swing_left, c + swing_right + 1):
+            if j != c and low[j] <= low[c]:
+                is_lo = False
+                break
+        if is_hi and is_lo:
+            # Ambiguous — pick whichever extreme is more prominent
+            hi_range = high[c] - min(high[c - swing_left:c + swing_right + 1])
+            lo_range = max(low[c - swing_left:c + swing_right + 1]) - low[c]
+            if hi_range >= lo_range:
+                is_lo = False
+            else:
+                is_hi = False
+        if is_hi:
+            # Avoid consecutive same-type pivots — keep the higher one
+            if pivot_type and pivot_type[-1] == 1:
+                if high[c] > high[pivot_idx[-1]]:
+                    pivot_idx[-1] = c
+                continue
+            pivot_idx.append(c)
+            pivot_type.append(1)
+        elif is_lo:
+            if pivot_type and pivot_type[-1] == -1:
+                if low[c] < low[pivot_idx[-1]]:
+                    pivot_idx[-1] = c
+                continue
+            pivot_idx.append(c)
+            pivot_type.append(-1)
+
+    # --- Pass 2: assign wave_id and wave_dir per bar ----------------
+    wave_dir = np.ones(n, dtype=np.int8)
+    wave_id = np.zeros(n, dtype=np.int32)
+
+    if len(pivot_idx) < 2:
+        # Not enough pivots — return a single wave
+        return {
+            "wave_dir": wave_dir,
+            "wave_id": wave_id,
+            "wave_high": high.copy(),
+            "wave_low": low.copy(),
+            "wave_vol": volume.copy(),
+            "wave_delta": np.zeros(n, dtype=np.float64),
+        }
+
+    current_wave = 0
+    # Before first pivot: direction from first pivot type
+    first_dir = -1 if pivot_type[0] == 1 else 1  # approaching a high → up wave
+    for b in range(pivot_idx[0] + 1):
+        wave_dir[b] = first_dir
+        wave_id[b] = current_wave
+
+    # Between consecutive pivots
+    for p in range(len(pivot_idx) - 1):
+        current_wave += 1
+        seg_dir = 1 if pivot_type[p] == -1 else -1  # from low→high = up wave
+        for b in range(pivot_idx[p] + 1, pivot_idx[p + 1] + 1):
+            wave_dir[b] = seg_dir
+            wave_id[b] = current_wave
+
+    # After last pivot
+    current_wave += 1
+    last_dir = 1 if pivot_type[-1] == -1 else -1
+    for b in range(pivot_idx[-1] + 1, n):
+        wave_dir[b] = last_dir
+        wave_id[b] = current_wave
+
+    # --- Pass 3: running wave aggregates ----------------------------
+    wave_high = np.empty(n, dtype=np.float64)
+    wave_low = np.empty(n, dtype=np.float64)
+    wave_vol = np.empty(n, dtype=np.float64)
+    wave_delta = np.zeros(n, dtype=np.float64)
+
+    seg_start = 0
+    for i in range(n):
+        if i > 0 and wave_id[i] != wave_id[i - 1]:
+            seg_start = i
+        wave_high[i] = high[seg_start:i + 1].max()
+        wave_low[i] = low[seg_start:i + 1].min()
+        wave_vol[i] = volume[seg_start:i + 1].sum()
+
+    return {
+        "wave_dir": wave_dir,
+        "wave_id": wave_id,
+        "wave_high": wave_high,
+        "wave_low": wave_low,
+        "wave_vol": wave_vol,
+        "wave_delta": wave_delta,
+    }
 
 
 def _simple_zigzag_waves(df: pd.DataFrame, pct_reversal: float = 0.005) -> dict:
@@ -933,9 +1065,11 @@ def _scan_range_structures(
                 continue
 
             if i - ro.climax_wave > cfg.max_range_waves:
-                # POST_TERMINAL ranges get extra time for SOS/SOW breakout
+                # POST_TERMINAL / MATURE ranges get extra time for SOS/SOW breakout
                 if ro.status == RangeStatus.POST_TERMINAL and ro.terminal_wave is not None and i - ro.terminal_wave <= cfg.post_terminal_breakout_window:
                     pass  # don't expire yet
+                elif ro.status == RangeStatus.MATURE and ro.response_wave is not None and i - ro.response_wave <= cfg.mature_breakout_window:
+                    pass  # give MATURE ranges a breakout window too
                 else:
                     ro.status = RangeStatus.EXPIRED
                     ro.end_bar = int(w["end_idx"])
@@ -1031,8 +1165,8 @@ def _scan_range_structures(
                             continue
 
             # 4) SOS / SOW
-            # SOS requires POST_TERMINAL (spring must precede); SOW can fire from MATURE too
-            if ro.status == RangeStatus.POST_TERMINAL:
+            # SOS can fire from POST_TERMINAL or MATURE (matching SOW behavior)
+            if ro.status in (RangeStatus.POST_TERMINAL, RangeStatus.MATURE):
                 if ro.side == RangeSide.ACCUM:
                     conf = _sos_conf(ro, wave_df, i, cfg)
                     if conf is not None and conf >= cfg.min_breakout_confidence:
