@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .config import (
+from .config_v2 import (
     TransformerConfig,
     TRANSFORMER_FEATURE_INDICES,
     PHASE_LABELS,
@@ -47,7 +47,7 @@ from .env import (
     N_ACTIONS,
     N_POSITION_FEATURES,
 )
-from .actor import ActorDiscreteTransformer
+from .actor_v2 import ActorDiscreteTransformer
 
 
 ACTION_NAMES = {
@@ -547,7 +547,7 @@ def main():
     parser.add_argument("--d-model", type=int, default=32)
     parser.add_argument("--n-layers", type=int, default=2)
     parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--dropout", type=float, default=0.38)
     parser.add_argument("--d-ff", type=int, default=None, help="Feed-forward dim (default: from checkpoint or d_model*4)")
     parser.add_argument("--bar-range", type=float, default=100.0)
     parser.add_argument("--tick-value", type=float, default=20.0)
