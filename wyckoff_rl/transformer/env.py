@@ -92,7 +92,7 @@ class WyckoffTransformerVecEnv:
         reward_clip: float = 2.0,
         bar_range: float = 40.0,
         reward_mode: str = "dense_pnl",
-        sign_flip: bool = False,
+        sign_flip: bool = True,
         gamma: float = 0.99,
         feat_mean: np.ndarray | None = None,
         feat_std: np.ndarray | None = None,
@@ -192,6 +192,22 @@ class WyckoffTransformerVecEnv:
         self._cib_min_pb_vol = 0.3
         self._cib_max_pb_vol = 0.85
         self._cib_max_large_wave = 0.5
+
+        # Sign-flip feature mapping: which selected-feature positions
+        # need negation or swapping when direction_flip < 0
+        _fi_list = self._fi.tolist()
+        _fi_to_pos = {col: pos for pos, col in enumerate(_fi_list)}
+        # Directional features to negate: body_ratio(0), delta_ratio(4),
+        # cvd_slope_fast(9), return_1(12), wave_direction(15), wave_delta_ratio(19)
+        _negate_cols = [0, 4, 9, 12, 15, 19]
+        self._flip_negate_pos = [_fi_to_pos[c] for c in _negate_cols if c in _fi_to_pos]
+        # Feature pairs to swap: vol_trend_up(29)↔down(30), shortening_up(31)↔down(32)
+        _swap_pairs = [(29, 30), (31, 32)]
+        self._flip_swap_pairs = [
+            (_fi_to_pos[a], _fi_to_pos[b])
+            for a, b in _swap_pairs
+            if a in _fi_to_pos and b in _fi_to_pos
+        ]
 
         # ElegantRL metadata
         self.env_name = "WyckoffTransformerVecEnv-v1"
@@ -297,6 +313,24 @@ class WyckoffTransformerVecEnv:
         indices = self.day.unsqueeze(1) + offsets                  # (ne, seq_len)
         # Gather: (ne, seq_len, n_bar_features)
         windows = self._padded_features[indices]
+
+        # Apply direction-flip to features for flipped envs
+        if self.sign_flip:
+            flipped = self.direction_flip < 0  # (ne,)
+            if flipped.any():
+                flip_mask = flipped.unsqueeze(1)  # (ne, 1) for broadcasting over seq_len
+                windows = windows.clone()
+                # Negate directional features
+                for pos in self._flip_negate_pos:
+                    col = windows[:, :, pos]
+                    windows[:, :, pos] = th.where(flip_mask, -col, col)
+                # Swap paired features
+                for pos_a, pos_b in self._flip_swap_pairs:
+                    a_vals = windows[:, :, pos_a].clone()
+                    b_vals = windows[:, :, pos_b].clone()
+                    windows[:, :, pos_a] = th.where(flip_mask, b_vals, windows[:, :, pos_a])
+                    windows[:, :, pos_b] = th.where(flip_mask, a_vals, windows[:, :, pos_b])
+
         # Flatten: (ne, seq_len * n_bar_features)
         windows_flat = windows.reshape(ne, sl * self.n_bar_features)
 
