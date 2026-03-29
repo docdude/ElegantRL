@@ -119,7 +119,7 @@ class TransformerConfig:
     n_heads: int = 4
     n_layers: int = 2
     d_ff: int = 96
-    dropout: float = 0.38
+    dropout: float = 0.25
 
     # Position features
     n_position_features: int = 8
@@ -133,7 +133,7 @@ class TransformerConfig:
 
     # Training
     phase_loss_weight: float = 1.0
-    event_loss_weight: float = 0.5
+    event_loss_weight: float = 0.15
     rl_loss_weight: float = 1.0
 
     # Episode

@@ -379,7 +379,7 @@ def pretrain(
     event_pos = np.maximum(event_pos, 1.0)
     event_neg = np.maximum(event_neg, 1.0)
 
-    event_pw = np.clip(event_neg / event_pos, 1.0, 100.0)
+    event_pw = np.clip(event_neg / event_pos, 1.0, 25.0)
     event_pos_weight = torch.tensor(event_pw, dtype=torch.float32, device=dev)
 
     print(f"Event pos_weight: {[f'{w:.1f}' for w in event_pw]}")
@@ -406,6 +406,8 @@ def pretrain(
         event_head.train()
 
         train_loss = 0.0
+        train_loss_phase = 0.0
+        train_loss_event = 0.0
         n_batches = 0
 
         for batch in train_loader:
@@ -448,10 +450,14 @@ def pretrain(
             optimizer.step()
 
             train_loss += loss.item()
+            train_loss_phase += loss_phase.item()
+            train_loss_event += loss_event.item()
             n_batches += 1
 
         scheduler.step()
         avg_train_loss = train_loss / max(n_batches, 1)
+        avg_train_phase = train_loss_phase / max(n_batches, 1)
+        avg_train_event = train_loss_event / max(n_batches, 1)
 
         # Validate
         encoder.eval()
@@ -459,6 +465,8 @@ def pretrain(
         event_head.eval()
 
         val_loss = 0.0
+        val_loss_phase = 0.0
+        val_loss_event = 0.0
         n_val_rows = 0
         phase_correct = 0
         n_val_phase = 0
@@ -499,6 +507,8 @@ def pretrain(
                 )
 
                 val_loss += loss.item() * feats.shape[0]
+                val_loss_phase += loss_phase.item() * feats.shape[0]
+                val_loss_event += loss_event.item() * feats.shape[0]
                 n_val_rows += feats.shape[0]
 
                 pred = phase_logits.argmax(dim=1)
@@ -507,12 +517,14 @@ def pretrain(
                 n_val_phase += valid_phase.sum().item()
 
         avg_val_loss = val_loss / max(n_val_rows, 1)
+        avg_val_phase = val_loss_phase / max(n_val_rows, 1)
+        avg_val_event = val_loss_event / max(n_val_rows, 1)
         phase_acc = phase_correct / max(n_val_phase, 1)
 
         print(
             f"Epoch {epoch + 1:3d}/{epochs} | "
-            f"train_loss={avg_train_loss:.4f} | "
-            f"val_loss={avg_val_loss:.4f} | "
+            f"train_loss={avg_train_loss:.4f} (ph={avg_train_phase:.4f} ev={avg_train_event:.4f}) | "
+            f"val_loss={avg_val_loss:.4f} (ph={avg_val_phase:.4f} ev={avg_val_event:.4f}) | "
             f"phase_acc={phase_acc:.3f} | "
             f"lr={scheduler.get_last_lr()[0]:.2e}"
         )
@@ -952,11 +964,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--pretrain-lr", type=float, default=4e-5)
-    parser.add_argument("--weight-decay", type=float, default=0.08)
+    parser.add_argument("--weight-decay", type=float, default=0.03)
     parser.add_argument("--label-smoothing", type=float, default=0.12)
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--noise-std", type=float, default=0.03)
-    parser.add_argument("--dropout", type=float, default=0.38)
+    parser.add_argument("--dropout", type=float, default=0.25)
     parser.add_argument("--warmup-epochs", type=int, default=6)
 
     # RL args
