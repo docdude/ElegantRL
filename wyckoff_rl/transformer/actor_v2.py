@@ -19,6 +19,15 @@ from torch.distributions import Categorical
 from .encoder import WyckoffTransformerEncoder
 from .heads_v2 import PhaseHead, EventHead
 from .config_v2 import TransformerConfig
+from .env import (
+    ACTION_HOLD,
+    ACTION_ENTER_LONG,
+    ACTION_ENTER_SHORT,
+    ACTION_ADD,
+    ACTION_REDUCE,
+    ACTION_EXIT,
+    N_ACTIONS,
+)
 
 
 class ActorDiscreteTransformer(nn.Module):
@@ -88,18 +97,44 @@ class ActorDiscreteTransformer(nn.Module):
         latent = full_latent[:, -1, :]
         return latent, pos_feats, full_latent
 
+    def _compute_action_mask(self, pos_feats: torch.Tensor) -> torch.Tensor:
+        """
+        Build a boolean mask (batch, n_actions) where True = valid action.
+        pos_feats[:, 0] is obs_side (direction-flipped pos_side).
+        """
+        batch = pos_feats.shape[0]
+        mask = torch.zeros(batch, self.action_dim, dtype=torch.bool, device=pos_feats.device)
+        is_flat = pos_feats[:, 0].abs() < 0.5  # obs_side == 0 when flat
+
+        # Always valid
+        mask[:, ACTION_HOLD] = True
+        # Entry only when flat
+        mask[:, ACTION_ENTER_LONG] = is_flat
+        mask[:, ACTION_ENTER_SHORT] = is_flat
+        # Position management only when positioned
+        mask[:, ACTION_ADD] = ~is_flat
+        mask[:, ACTION_REDUCE] = ~is_flat
+        mask[:, ACTION_EXIT] = ~is_flat
+        return mask
+
+    def _apply_mask(self, logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Set logits for invalid actions to -inf."""
+        return logits.masked_fill(~mask, float('-inf'))
+
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """
-        Deterministic action selection (argmax).
+        Deterministic action selection (argmax) with action masking.
         """
         latent, pos_feats, _ = self._encode(state)
         policy_input = torch.cat([latent, pos_feats], dim=-1)
         logits = self.policy_head(policy_input)
+        mask = self._compute_action_mask(pos_feats)
+        logits = self._apply_mask(logits, mask)
         return logits.argmax(dim=-1)
 
     def get_action(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Stochastic action selection for training.
+        Stochastic action selection for training with action masking.
 
         Returns
         -------
@@ -109,6 +144,8 @@ class ActorDiscreteTransformer(nn.Module):
         latent, pos_feats, _ = self._encode(state)
         policy_input = torch.cat([latent, pos_feats], dim=-1)
         logits = self.policy_head(policy_input)
+        mask = self._compute_action_mask(pos_feats)
+        logits = self._apply_mask(logits, mask)
         dist = Categorical(logits=logits)
         action = dist.sample()
         logprob = dist.log_prob(action)
@@ -120,11 +157,13 @@ class ActorDiscreteTransformer(nn.Module):
         action: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute log probability and entropy for PPO objective.
+        Compute log probability and entropy for PPO objective with action masking.
         """
         latent, pos_feats, _ = self._encode(state)
         policy_input = torch.cat([latent, pos_feats], dim=-1)
         logits = self.policy_head(policy_input)
+        mask = self._compute_action_mask(pos_feats)
+        logits = self._apply_mask(logits, mask)
         dist = Categorical(logits=logits)
         return dist.log_prob(action), dist.entropy()
 

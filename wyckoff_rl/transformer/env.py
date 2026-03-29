@@ -86,13 +86,13 @@ class WyckoffTransformerVecEnv:
         entry_bonus_scale: float = 0.50,
         invalid_penalty: float = 0.02,
         carry_cost: float = 0.0,
-        carry_multiplier: float = 0.0,
+        carry_multiplier: float = 0.3,
         vesting_bars: int = 10,
         pnl_norm: float = 2000.0,
         reward_clip: float = 2.0,
         bar_range: float = 40.0,
         reward_mode: str = "dense_pnl",
-        sign_flip: bool = True,
+        sign_flip: bool = False,
         gamma: float = 0.99,
         feat_mean: np.ndarray | None = None,
         feat_std: np.ndarray | None = None,
@@ -421,11 +421,13 @@ class WyckoffTransformerVecEnv:
                 self.vesting_remaining,
             )
         still_vesting = self.vesting_remaining > 0
+        # Spread bonus evenly over vesting period (not cliff at end)
+        per_bar = self.vesting_amount / max(self.vesting_bars, 1)
+        bonus = th.where(still_vesting, per_bar, th.zeros_like(self.vesting_amount))
         self.vesting_remaining = th.where(
             still_vesting, self.vesting_remaining - 1, self.vesting_remaining
         )
         vesting_done = still_vesting & (self.vesting_remaining == 0)
-        bonus = th.where(vesting_done, self.vesting_amount, th.zeros_like(self.vesting_amount))
         self.vesting_amount = th.where(vesting_done, th.zeros_like(self.vesting_amount), self.vesting_amount)
         return bonus
 
