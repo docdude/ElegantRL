@@ -1000,6 +1000,8 @@ def main():
     parser.add_argument("--d-model", type=int, default=32)
     parser.add_argument("--n-layers", type=int, default=2)
     parser.add_argument("--n-heads", type=int, default=4)
+    parser.add_argument("--d-ff", type=int, default=None, help="FF dim (default: 3*d_model)")
+    parser.add_argument("--event-loss-weight", type=float, default=0.15)
 
     args = parser.parse_args()
 
@@ -1008,7 +1010,9 @@ def main():
         d_model=args.d_model,
         n_layers=args.n_layers,
         n_heads=args.n_heads,
+        d_ff=args.d_ff if args.d_ff else args.d_model * 3,
         dropout=args.dropout,
+        event_loss_weight=args.event_loss_weight,
     )
 
     resolved_label_path = args.label_path
