@@ -118,7 +118,8 @@ class WyckoffSequenceDataset(Dataset):
                 f"0..{config.n_phases - 1}. Regenerate labels."
             )
 
-        self.valid_start = self.seq_len
+        # valid_start = seq_len - 1 so that sample 0 uses bars [0, seq_len-1]
+        self.valid_start = self.seq_len - 1
         self.n_samples = self.n_bars - self.valid_start
 
     def __len__(self):
@@ -127,26 +128,20 @@ class WyckoffSequenceDataset(Dataset):
     def __getitem__(self, idx):
         bar_idx = self.valid_start + idx
 
-        window = self.features[bar_idx - self.seq_len:bar_idx].copy()
+        # Window includes current bar: bars [bar_idx - seq_len + 1, bar_idx]
+        # This matches env.get_state() which returns tech_ary[day-W+1 : day+1]
+        window_start = bar_idx - self.seq_len + 1
+        window = self.features[window_start:bar_idx + 1].copy()
         window = (window - self.feat_mean) / self.feat_std
 
         if self.augment:
             noise = np.random.randn(*window.shape).astype(np.float32) * self.noise_std
             window = window + noise
 
-        # Full sequence phase labels for multi-position supervision.
-        # Position i predicts phase of bar (bar_idx - seq_len + i + 1),
-        # consistent with the last position predicting bar_idx.
-        seq_label_start = bar_idx - self.seq_len + 1
-        phase_seq = self.phase_labels[seq_label_start:bar_idx + 1].copy()
-        pw_seq = self.phase_weight[seq_label_start:bar_idx + 1].copy()
-
         return {
             "features": torch.from_numpy(window),
             "phase": torch.tensor(self.phase_labels[bar_idx], dtype=torch.long),
             "phase_weight": torch.tensor(self.phase_weight[bar_idx], dtype=torch.float32),
-            "phase_seq": torch.from_numpy(phase_seq),
-            "phase_weight_seq": torch.from_numpy(pw_seq),
             "events": torch.from_numpy(self.event_labels[bar_idx]).float(),
             "event_weight": torch.from_numpy(self.event_weight[bar_idx]).float(),
         }
@@ -423,26 +418,25 @@ def pretrain(
 
         for batch in train_loader:
             feats = batch["features"].to(dev)
+            phase_tgt = batch["phase"].to(dev)
+            phase_wt = batch["phase_weight"].to(dev)
             event_tgt = batch["events"].to(dev)
             event_wt = batch["event_weight"].to(dev)
-            phase_seq = batch["phase_seq"].to(dev)         # (B, T)
-            phase_wt_seq = batch["phase_weight_seq"].to(dev)  # (B, T)
 
             latent = encoder(feats)                          # (B, T, D)
-            B, T, D = latent.shape
+            last_latent = latent[:, -1, :]                   # (B, D)
 
-            # Full-sequence phase supervision (all T positions)
-            all_phase_logits = phase_head(latent.reshape(B * T, D))  # (B*T, n_phases)
+            # Phase: last position only (matches inference)
+            phase_logits = phase_head(last_latent)
             loss_phase = weighted_phase_loss(
-                all_phase_logits,
-                phase_seq.reshape(-1),
-                phase_wt_seq.reshape(-1),
+                phase_logits,
+                phase_tgt,
+                phase_wt,
                 class_weight=phase_weights_t,
                 label_smoothing=label_smoothing,
             )
 
-            # Events: last position only (sparse signal)
-            last_latent = latent[:, -1, :]
+            # Events: last position only
             event_logits = event_head(last_latent)
             loss_event = weighted_event_loss(
                 event_logits,
@@ -488,27 +482,25 @@ def pretrain(
         with torch.no_grad():
             for batch in val_loader:
                 feats = batch["features"].to(dev)
-                phase_tgt = batch["phase"].to(dev)    # scalar (last bar)
+                phase_tgt = batch["phase"].to(dev)
+                phase_wt = batch["phase_weight"].to(dev)
                 event_tgt = batch["events"].to(dev)
                 event_wt = batch["event_weight"].to(dev)
-                phase_seq = batch["phase_seq"].to(dev)            # (B, T)
-                phase_wt_seq = batch["phase_weight_seq"].to(dev)  # (B, T)
 
                 latent = encoder(feats)
-                B, T, D = latent.shape
+                last_latent = latent[:, -1, :]
 
-                # Full-sequence phase loss
-                all_phase_logits = phase_head(latent.reshape(B * T, D))
+                # Phase: last position only
+                phase_logits = phase_head(last_latent)
                 loss_phase = weighted_phase_loss(
-                    all_phase_logits,
-                    phase_seq.reshape(-1),
-                    phase_wt_seq.reshape(-1),
+                    phase_logits,
+                    phase_tgt,
+                    phase_wt,
                     class_weight=phase_weights_t,
                     label_smoothing=label_smoothing,
                 )
 
                 # Events: last position only
-                last_latent = latent[:, -1, :]
                 event_logits = event_head(last_latent)
                 loss_event = weighted_event_loss(
                     event_logits,
@@ -529,9 +521,8 @@ def pretrain(
                 val_loss_event += loss_event.item() * feats.shape[0]
                 n_val_rows += feats.shape[0]
 
-                # Accuracy: last position only (matches inference)
-                last_phase_logits = all_phase_logits.reshape(B, T, -1)[:, -1, :]
-                pred = last_phase_logits.argmax(dim=1)
+                # Accuracy: last position only
+                pred = phase_logits.argmax(dim=1)
                 valid_phase = phase_tgt != PHASE_IGNORE_INDEX
                 phase_correct += ((pred == phase_tgt) & valid_phase).sum().item()
                 n_val_phase += valid_phase.sum().item()
